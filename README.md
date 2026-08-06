@@ -1,19 +1,15 @@
 # HALSER Wind Interface
 
-ESP32-C3 firmware for the [HALSER](https://shop.hatlabs.fi/products/halser) board that bridges an **Autonnic A5120** ultrasonic wind instrument to NMEA 2000 and Signal K networks.
+ESP32-C3 firmware for the [HALSER](https://shop.hatlabs.fi/products/halser) board that bridges an **LCJ Capteurs CV7** ultrasonic wind instrument to NMEA 2000 and Signal K networks.
 
 This firmware serves as both a ready-to-use application and a reference example for building custom SensESP-based marine interface firmware.
 
 ## Features
 
-- Receives apparent wind data (speed and angle) from the Autonnic A5120 via NMEA 0183 WIMWV sentences at 4800 bit/s
+- Receives apparent wind data (speed and angle) from the CV7 via NMEA 0183 `$IIMWV` sentences at 4800 bit/s
 - Transmits wind data as NMEA 2000 PGN 130306 (Wind Data) at 100ms intervals
 - Outputs wind data to Signal K via WiFi/WebSocket
-- Configurable Autonnic A5120 parameters via web UI:
-  - Reference angle offset (wind vane alignment)
-  - Wind direction damping
-  - Wind speed damping
-  - Message repetition rate
+- Configurable reference angle offset via web UI (wind vane alignment, applied entirely in software)
 - OLED display showing hostname, IP, uptime, wind speed, and wind angle
 - RGB LED activity indicator
 - OTA firmware updates
@@ -22,7 +18,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 ## Hardware Required
 
 - [HALSER](https://shop.hatlabs.fi/products/halser) board
-- [Autonnic A5120](https://autonnic.com/a5120/) ultrasonic wind instrument
+- [LCJ Capteurs CV7](https://lcjcapteurs.com/) ultrasonic wind instrument
 - NMEA 2000 network connection
 - Optional: SSD1306 128x64 OLED display (I2C)
 
@@ -30,8 +26,8 @@ This firmware serves as both a ready-to-use application and a reference example 
 
 | HALSER Pin | Function |
 |------------|----------|
-| GPIO 2 | UART1 TX → Autonnic RX |
-| GPIO 3 | UART1 RX ← Autonnic TX |
+| GPIO 2 | UART1 TX (unused — CV7 has no NMEA 0183 command channel) |
+| GPIO 3 | UART1 RX ← CV7 TX |
 | GPIO 4 | CAN TX → NMEA 2000 |
 | GPIO 5 | CAN RX ← NMEA 2000 |
 | GPIO 6 | I2C SDA (OLED display) |
@@ -39,13 +35,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 | GPIO 8 | RGB LED (SK6805) |
 | GPIO 9 | Button |
 
-The Autonnic A5120 communicates via NMEA 0183 at 4800 bit/s (8N1).
-
-## Hardware Connection
-
-The A5120 uses RS-232 levels for its TX output (data to HALSER) and NMEA 0183 levels for its RX input (configuration commands from HALSER). Set the HALSER RX jumper to **R** (RS-232 mode). HALSER TX is connected to the NMEA 0183 TX output.
-
-Use a 5-pin SP13 connector to route the masthead cable into the HALSER enclosure.
+The CV7 communicates via NMEA 0183 at 4800 bit/s (8N1), transmit-only — it accepts no configuration commands over the serial link.
 
 ## Usage
 
@@ -60,24 +50,7 @@ Use a 5-pin SP13 connector to route the masthead cable into the HALSER enclosure
 
 Navigate to the **Reference Angle** section in the web UI. Enter the angle readout (in degrees) when the wind vane is pointing straight ahead. This offset corrects for misalignment between the wind instrument and the vessel's heading.
 
-The value is stored internally in radians but displayed in degrees in the web UI.
-
-### Configuring Damping
-
-The **Wind Direction Damping** and **Wind Speed Damping** sections control smoothing applied to the wind data. Values range from 0 to 100, with a default of 50. Higher values produce smoother readings but increase response lag.
-
-### Configuring Message Repetition Rate
-
-The **Message Repetition Rate** sets how often the A5120 sends WIMWV sentences, in milliseconds. Default is 500ms.
-
-### Dual Configuration Storage
-
-All Autonnic configuration parameters are stored in two places:
-
-1. **ESP32 filesystem** — persists across firmware reboots
-2. **Autonnic A5120** — sent as proprietary `$PATC,IIMWV` commands with ACK confirmation
-
-When a setting is saved via the web UI, the firmware writes to the filesystem and sends the corresponding command to the A5120. A semaphore-based mechanism waits for the `$PATC,WIMWV,ACK` response to confirm the command was accepted.
+Unlike some wind instruments, the CV7 exposes no NMEA 0183 command to apply this offset in the instrument itself, so it is applied entirely in software (via a `LambdaTransform` in `main.cpp`) to the parsed wind angle, and persisted only to the ESP32 filesystem.
 
 ### Signal K Integration
 
@@ -107,40 +80,33 @@ If connected, a 128x64 SSD1306 OLED display shows:
 ## Architecture
 
 ```
-Autonnic A5120 (NMEA 0183, 4800 bit/s)
+CV7 (NMEA 0183, 4800 bit/s)
   │
-  │ UART1 (GPIO 3 RX / GPIO 2 TX)
+  │ UART1 (GPIO 3 RX only)
   ▼
 NMEA0183IOTask
-  ├── WIMWVSentenceParser (apparent wind speed + angle)
-  │     ├── N2kWindDataSender → NMEA 2000 bus (TWAI, GPIO 4/5)
-  │     ├── SKOutputFloat     → Signal K server (speed + angle)
-  │     └── InfoDisplay       → OLED (speed + angle)
-  │
-  └── AutonnicPATCWIMWVParser (ACK responses for config commands)
+  └── WIMWVSentenceParser (apparent wind speed + angle, matches $IIMWV)
+        ├── Reference angle offset (LambdaTransform, software-only)
+        │     ├── N2kWindDataSender → NMEA 2000 bus (TWAI, GPIO 4/5)
+        │     ├── SKOutputFloat     → Signal K server (angle)
+        │     └── InfoDisplay       → OLED (angle)
+        ├── SKOutputFloat           → Signal K server (speed)
+        └── InfoDisplay             → OLED (speed)
 
-Web UI (SensESP) ──── Config objects ──── Autonnic (serial commands)
-                                     └── Filesystem (persistent storage)
+Web UI (SensESP) ──── Reference angle transform ──── Filesystem (persistent storage)
 ```
 
 The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which provides WiFi connectivity, a web UI for configuration, Signal K protocol support, and OTA updates.
 
 ### Key Design Patterns
 
-**Producer/Consumer pipeline:** SensESP uses a reactive pipeline where producers emit values that flow to connected consumers. The WIMWV parser produces apparent wind speed and angle values consumed by the N2K sender, Signal K outputs, and OLED display. Producers and consumers are connected via `connect_to()`.
+**Producer/Consumer pipeline:** SensESP uses a reactive pipeline where producers emit values that flow to connected consumers. The WIMWV parser produces apparent wind speed and angle values consumed (via the reference angle transform, for angle) by the N2K sender, Signal K outputs, and OLED display. Producers and consumers are connected via `connect_to()`.
 
-**Dual config storage with command/ACK confirmation:** Each config object (`ReferenceAngleConfig`, `WindDirectionDampingConfig`, etc.) saves to the ESP32 filesystem and sends a proprietary command to the Autonnic A5120. A `SemaphoreValue` waits up to 1 second (5 seconds for repetition rate) for the ACK response, parsed by `AutonnicPATCWIMWVParser`.
+**Software-only calibration:** The reference angle offset is a `LambdaTransform` with a single configurable parameter, persisted to the ESP32 filesystem. Because the CV7 has no NMEA 0183 command channel, there is no device-side equivalent to keep in sync — unlike instruments (such as the Autonnic A5120 this codebase originally targeted) that accept serial configuration commands.
 
 **NMEA 2000 value expiry:** The `N2kWindDataSender` wraps inputs in `RepeatExpiring<double>`, which returns `N2kDoubleNA` when the source value is older than 5 seconds. This prevents stale wind data from being transmitted as valid measurements while maintaining the 100ms PGN 130306 transmission rate.
 
 ## Code Structure
-
-### Autonnic Configuration (`src/`)
-
-| File | Purpose |
-|------|---------|
-| `autonnic_config.h` | 4 config classes (reference angle, direction damping, speed damping, repetition rate) with dual filesystem/serial storage |
-| `autonnic_a5120_parser.h` | `SentenceParser` for proprietary `$PATC,WIMWV,ACK` responses |
 
 ### NMEA 2000 Output (`src/sender/`)
 
@@ -152,21 +118,21 @@ The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which pr
 
 | File | Purpose |
 |------|---------|
-| `main.cpp` | Entry point — wires all components together |
+| `main.cpp` | Entry point — wires all components together, including the reference angle `LambdaTransform` |
 | `ssd1306_display.h/.cpp` | OLED display driver (hostname, IP, uptime, AWS, AWA) |
 
-### Autonnic A5120 Protocol
+### CV7 Protocol
 
-Configuration uses proprietary NMEA 0183 sentences:
+The CV7 outputs standard NMEA 0183 sentences at 4800 bit/s, every 0.5s, with standard checksums:
 
-| Command | Sentence | Description |
-|---------|----------|-------------|
-| Reference angle | `$PATC,IIMWV,AHD,<degrees>` | Wind vane alignment offset |
-| Direction damping | `$PATC,IIMWV,DWD,<factor>` | Direction smoothing (0-100) |
-| Speed damping | `$PATC,IIMWV,DSP,<factor>` | Speed smoothing (0-100) |
-| Repetition rate | `$PATC,IIMWV,TXP,<ms>` | Message interval in milliseconds |
+| Sentence | Description |
+|----------|-------------|
+| `$IIMWV,<angle>,R,<speed>,<unit>,<status>` | Apparent wind angle + speed, relative reference |
+| `$WIXDR,C,<temp>,C,,` | Wind sensor temperature (not currently consumed by this firmware) |
 
-All commands receive a `$PATC,WIMWV,ACK` response on success. The parser ignores checksums because the A5120 does not include them in responses.
+SensESP's built-in `WIMWVSentenceParser` matches the `MWV` formatter regardless of talker ID, so it parses the CV7's `$IIMWV` sentences unmodified.
+
+The CV7 also emits undocumented `$PLCJ,...` / `$PLCJEA...` sentences described only as "for LCJ Capteurs technical service" — this firmware does not use them, and the CV7 has no public NMEA 0183 command interface for configuration (unlike the Autonnic A5120, which accepted `$PATC,IIMWV,AHD/DWD/DSP/TXP` commands with ACK confirmation).
 
 ### NMEA 2000 Device Identity
 
@@ -202,14 +168,13 @@ This repository does not yet have automated tests. Contributions are welcome.
 This firmware demonstrates several patterns useful for building custom SensESP marine interfaces:
 
 1. **NMEA 0183 sentence parsing** — Using SensESP's built-in `WIMWVSentenceParser` for standard sentences
-2. **External device configuration** — Command/ACK pattern with semaphore-based confirmation and timeout handling
+2. **Software-only calibration** — A `LambdaTransform` with persisted config for devices with no command channel
 3. **NMEA 2000 output with value expiry** — `RepeatExpiring` prevents stale data transmission while maintaining constant PGN rate
-4. **Dual config storage** — Persisting settings to both the ESP32 filesystem and the external device via serial commands
-5. **Producer/Consumer pipeline** — Connecting a single data source (wind parser) to multiple sinks (N2K, Signal K, OLED)
+4. **Producer/Consumer pipeline** — Connecting a single data source (wind parser) to multiple sinks (N2K, Signal K, OLED)
 
 To adapt this for a different device:
-- Replace the `AutonnicPATCWIMWVParser` and config classes with your device's protocol
 - Modify or replace `WIMWVSentenceParser` if your device uses different NMEA 0183 sentences
+- If your device accepts NMEA 0183 configuration commands, replace the `LambdaTransform`-based reference angle with a command/ACK pattern (persist to filesystem, send the command, wait on a `SemaphoreValue` for the response)
 - Update the N2K sender for your target PGNs
 - Adjust pin assignments and bit rate in `main.cpp`
 

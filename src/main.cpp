@@ -27,6 +27,7 @@
 #include "elapsedMillis.h"
 #include "hwt3100_heading_reader.h"
 #include "sender/n2k_senders.h"
+#include "sender/udp_nmea0183_sender.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/system/serial_number.h"
 #include "sensesp/transforms/lambda_transform.h"
@@ -215,6 +216,19 @@ void setup() {
       new SKMetadata("rad", "Magnetic Heading"));
 
   heading_reader->connect_to(heading_sk);
+
+  /////////////////////////////////////////////////////////////////////
+  // UDP NMEA 0183 output (broadcast, port 10110) — an additional output
+  // for chartplotter apps (e.g. OpenCPN) that can consume NMEA 0183 over
+  // the network directly, without a Signal K server in between.
+
+  auto udp_nmea0183_sender = std::make_shared<UdpNmea0183Sender>();
+
+  wind_parser->apparent_wind_speed_.connect_to(
+      &(udp_nmea0183_sender->wind_speed_consumer));
+  reference_angle_transform->connect_to(
+      &(udp_nmea0183_sender->wind_angle_consumer));
+  heading_reader->connect_to(&(udp_nmea0183_sender->heading_consumer));
 
   /////////////////////////////////////////////////////////////////////
   // Configuration elements

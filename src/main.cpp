@@ -1,20 +1,26 @@
 // HALSER Wind Interface Firmware — application entry point.
-// Wires the data pipeline: Autonnic A5120 (NMEA 0183 over UART) → WIMWV
-// sentence parser → N2K wind data sender (PGN 130306) + Signal K + OLED.
-// Config objects (reference angle, damping, repetition rate) are dual-stored:
-// ESP32 filesystem for persistence and Autonnic serial commands for device sync.
+// Wires the data pipeline: LCJ Capteurs CV7 (NMEA 0183 over UART) → MWV
+// sentence parser → reference angle offset → N2K wind data sender (PGN
+// 130306) + Signal K + OLED.
+//
+// Unlike the Autonnic A5120 this firmware was originally written for, the
+// CV7 exposes no NMEA 0183 command channel for configuring the instrument
+// (its $PLCJ,... sentences are an undocumented technical-service protocol,
+// not a public configuration interface). The reference angle offset is
+// therefore applied entirely in software via a LambdaTransform, persisted
+// to the ESP32 filesystem only.
 
 #include <NMEA2000_esp32.h>
 
+#include <cmath>
 #include <memory>
 
 #include "Wire.h"
-#include "autonnic_a5120_parser.h"
-#include "autonnic_config.h"
 #include "elapsedMillis.h"
 #include "sender/n2k_senders.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/system/serial_number.h"
+#include "sensesp/transforms/lambda_transform.h"
 #include "sensesp/ui/config_item.h"
 #include "sensesp/ui/status_page_item.h"
 #include "sensesp/ui/ui_controls.h"
@@ -30,6 +36,8 @@ using namespace wind_interface;
 // HALSER pin assignments
 constexpr int kWindBitRate = 4800;
 constexpr gpio_num_t kUART1RxPin = GPIO_NUM_3;
+// The CV7 is transmit-only over NMEA 0183 (no command channel), so this pin
+// carries no traffic, but Serial1.begin() still requires a TX pin argument.
 constexpr gpio_num_t kUART1TxPin = GPIO_NUM_2;
 constexpr gpio_num_t kCANTxPin = GPIO_NUM_4;
 constexpr gpio_num_t kCANRxPin = GPIO_NUM_5;
@@ -64,66 +72,40 @@ void setup() {
   auto nmea0183_io_task = std::make_shared<NMEA0183IOTask>(&Serial1);
 
   // Wind sentence parser — connected directly to parser, no TaskQueueProducer
-  // (ESP32-C3 is single-core, so cross-task bridging is unnecessary)
+  // (ESP32-C3 is single-core, so cross-task bridging is unnecessary). The
+  // CV7 emits standard $IIMWV sentences (relative reference); SensESP's
+  // built-in wind parser matches MWV regardless of talker ID, so it works
+  // unmodified with the CV7's output.
   auto wind_parser =
       std::make_shared<WIMWVSentenceParser>(&(nmea0183_io_task->parser_));
 
-  // Autonnic response parser for configuration commands
-  auto autonnic_response_parser =
-      std::make_shared<AutonnicPATCWIMWVParser>(&(nmea0183_io_task->parser_));
+  // Reference angle offset — corrects for misalignment between the CV7's
+  // mounting orientation and the vessel's centerline. The CV7 has no NMEA
+  // 0183 command to apply this in the instrument itself (unlike the
+  // Autonnic A5120's $PATC,IIMWV,AHD command), so it is applied here in
+  // software to the parsed wind angle before it reaches any consumer.
+  const ParamInfo* reference_angle_param_info =
+      new ParamInfo[1]{{"offset", "Offset (degrees)"}};
 
-  // Autonnic configuration parameters — each is an AutonnicFloatConfig
-  // parameterized with a sentence builder, JSON key, and schema string.
+  auto reference_angle_transform =
+      std::make_shared<LambdaTransform<float, float, float>>(
+          [](float angle, float offset_degrees) -> float {
+            float offset_radians = offset_degrees * M_PI / 180.0;
+            float result = fmodf(angle + offset_radians, 2 * M_PI);
+            if (result < 0) {
+              result += 2 * M_PI;
+            }
+            return result;
+          },
+          0.0f, reference_angle_param_info, "/Wind/Reference Angle");
 
-  auto reference_angle_config = std::make_shared<AutonnicFloatConfig>(
-      nmea0183_io_task.get(), 0, autonnic_response_parser.get(),
-      AutonnicReferenceAngleSentence, "offset",
-      R"({"type":"object","properties":{"offset":{"title":"Offset","type":"number","displayMultiplier":0.017453292519943295,"displayOffset":0}}})",
-      "/Wind/Reference Angle");
-
-  ConfigItem(reference_angle_config)
+  ConfigItem(reference_angle_transform)
       ->set_title("Reference Angle")
       ->set_description(
           "Reference angle offset for wind data (in degrees). "
           "Enter the angle readout when the wind vane is pointing "
           "straight ahead.")
       ->set_sort_order(300);
-
-  auto wind_direction_damping_config = std::make_shared<AutonnicFloatConfig>(
-      nmea0183_io_task.get(), 50.0, autonnic_response_parser.get(),
-      AutonnicWindDirectionDampingSentence, "damping_factor",
-      R"({"type":"object","properties":{"damping_factor":{"title":"Damping Factor","type":"number"}}})",
-      "/Wind/Direction Damping");
-
-  ConfigItem(wind_direction_damping_config)
-      ->set_title("Wind Direction Damping")
-      ->set_description(
-          "Wind direction damping factor (0-100.0). Default is "
-          "50.0.")
-      ->set_sort_order(400);
-
-  auto wind_speed_damping_config = std::make_shared<AutonnicFloatConfig>(
-      nmea0183_io_task.get(), 50.0, autonnic_response_parser.get(),
-      AutonnicWindSpeedDampingSentence, "damping_factor",
-      R"({"type":"object","properties":{"damping_factor":{"title":"Damping Factor","type":"number"}}})",
-      "/Wind/Speed Damping");
-
-  ConfigItem(wind_speed_damping_config)
-      ->set_title("Wind Speed Damping")
-      ->set_description("Wind speed damping factor (0-100.0). Default is 50.0.")
-      ->set_sort_order(500);
-
-  auto wind_output_repetition_rate_config =
-      std::make_shared<WindOutputRepetitionRateConfig>(
-          nmea0183_io_task.get(), 500, autonnic_response_parser.get(),
-          "/Wind/Message Repetition Rate");
-
-  ConfigItem(wind_output_repetition_rate_config)
-      ->set_title("Message Repetition Rate")
-      ->set_description(
-          "Wind message repetition rate in milliseconds. Default "
-          "is 500.")
-      ->set_sort_order(200);
 
   /////////////////////////////////////////////////////////////////////
   // Initialize NMEA 2000 functionality
@@ -165,9 +147,11 @@ void setup() {
   auto wind_data_sender = std::make_shared<N2kWindDataSender>(
       "/Wind/NMEA2000", tN2kWindReference::N2kWind_Apparent, nmea2000, true);
 
-  // Wire wind parser outputs directly to N2K sender
+  // Wire wind parser outputs to N2K sender. Wind angle is routed through the
+  // reference angle offset transform first.
   wind_parser->apparent_wind_speed_.connect_to(&(wind_data_sender->wind_speed_));
-  wind_parser->apparent_wind_angle_.connect_to(&(wind_data_sender->wind_angle_));
+  wind_parser->apparent_wind_angle_.connect_to(reference_angle_transform);
+  reference_angle_transform->connect_to(&(wind_data_sender->wind_angle_));
 
   wind_data_sender->connect_to(
       std::make_shared<LambdaConsumer<std::pair<double, double>>>(
@@ -188,7 +172,7 @@ void setup() {
       new SKMetadata("rad", "Apparent Wind Angle"));
 
   wind_parser->apparent_wind_speed_.connect_to(wind_speed_sk);
-  wind_parser->apparent_wind_angle_.connect_to(wind_angle_sk);
+  reference_angle_transform->connect_to(wind_angle_sk);
 
   /////////////////////////////////////////////////////////////////////
   // Configuration elements
@@ -239,7 +223,7 @@ void setup() {
   auto display = std::make_shared<InfoDisplay>(&Wire);
   wind_parser->apparent_wind_speed_.connect_to(
       &(display->apparent_wind_speed_consumer));
-  wind_parser->apparent_wind_angle_.connect_to(
+  reference_angle_transform->connect_to(
       &(display->apparent_wind_angle_consumer));
 
   while (true) {

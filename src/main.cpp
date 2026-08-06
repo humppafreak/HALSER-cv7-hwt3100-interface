@@ -93,7 +93,7 @@ void setup() {
   // SensESP application
   SensESPAppBuilder builder;
   sensesp_app = (&builder)
-                    ->set_hostname("wind")
+                    ->set_hostname("wind-hdg")
                     ->set_button_pin(kButtonPin)
                     ->enable_ota("thisisfine")
                     ->get_app();
@@ -204,9 +204,9 @@ void setup() {
   nmea2000->SetProductInformation(
       "20240601",  // Manufacturer's Model serial code (max 32 chars)
       105,         // Manufacturer's product code
-      "Wind-N2K",  // Manufacturer's Model ID (max 33 chars)
-      "1.2.0",     // Manufacturer's Software version code (max 40 chars)
-      "1.2.0"      // Manufacturer's Model version (max 24 chars)
+      "Wind-Hdg-N2K",  // Manufacturer's Model ID (max 33 chars)
+      "1.2.1",     // Manufacturer's Software version code (max 40 chars)
+      "1.2.1"      // Manufacturer's Model version (max 24 chars)
   );
 
   nmea2000->SetDeviceInformation(

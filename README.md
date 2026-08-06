@@ -88,7 +88,7 @@ The terminal blocks and headers above are already routed to these ESP32-C3 pins 
 1. Flash the firmware to the HALSER board
 2. The device creates a WiFi access point on first boot
 3. Connect to the AP and configure your WiFi network credentials
-4. Access the web UI at `http://wind.local`
+4. Access the web UI at `http://wind-hdg.local`
 
 ### Configuring Reference Angle
 
@@ -114,7 +114,7 @@ An input toggle and an output toggle are independent: disabling the wind input s
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
 
-The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.2.0.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.2.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
+The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.2.1.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.2.1.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
 
 To flash a downloaded binary onto a device that's already running this firmware:
 

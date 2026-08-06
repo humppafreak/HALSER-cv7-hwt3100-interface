@@ -72,7 +72,7 @@ jobs:
           if [ -z "$version" ]; then
             version="manual-$(date +%Y%m%d%H%M%S)"
           fi
-          out="HALSER-cv7-wind-interface-${version}.bin"
+          out="HALSER-cv7-hwt3100-interface-${version}.bin"
           cp .pio/build/halser/firmware.bin "$out"
           echo "asset_path=$out" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"

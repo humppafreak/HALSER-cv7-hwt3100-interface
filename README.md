@@ -114,7 +114,7 @@ An input toggle and an output toggle are independent: disabling the wind input s
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
 
-The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-wind-interface-v1.2.0.bin`](firmware/HALSER-cv7-wind-interface-v1.2.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
+The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.2.0.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.2.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
 
 To flash a downloaded binary onto a device that's already running this firmware:
 
@@ -123,7 +123,7 @@ To flash a downloaded binary onto a device that's already running this firmware:
 pio run -t upload --upload-port <device-ip> --upload-flags="--auth=thisisfine"
 
 # Or using espota.py directly
-python espota.py -i <device-ip> -a thisisfine -f firmware/HALSER-cv7-wind-interface-<version>.bin
+python espota.py -i <device-ip> -a thisisfine -f firmware/HALSER-cv7-hwt3100-interface-<version>.bin
 ```
 
 Note that the binary is the application image only (no bootloader/partition table), so it's only valid for OTA onto a device already running compatible firmware — first-time programming still requires a wired `pio run -t upload`.

@@ -207,7 +207,7 @@ dependencies:
       type: service
     version: 1.2.0
   espressif/esp_secure_cert_mgr:
-    component_hash: 40a986c1f45d91eb6d339ca51dcab90c4ecce2a6622c268edaaa05887852d464
+    component_hash: 0b83e150f48d6839f0a0a8753850be55a51cc298cfca7658f21d355d5f41dd67
     dependencies:
     - name: idf
       require: private
@@ -215,7 +215,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 2.9.2
+    version: 2.9.3
   espressif/jsmn:
     component_hash: d80350c41bbaa827c98a25b6072df00884e72f54885996fab4a4f0aebce6b6c3
     dependencies:
@@ -258,7 +258,7 @@ dependencies:
       type: service
     version: 1.0.22
   espressif/mdns:
-    component_hash: 291732b5df4d181eb75eba9042799a508c4c124503a0c0573132a0a48d2e3fbe
+    component_hash: e81ca7a7f53ea34e78274df054da692c272e1315572876b237b1748e267c013b
     dependencies:
     - name: idf
       require: private
@@ -266,7 +266,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.11.2
+    version: 1.11.3
   espressif/network_provisioning:
     component_hash: ef2e10182fd1861e68b821491916327c25416ca7ae70e5a6e43313dbc71fe993
     dependencies:
@@ -325,6 +325,6 @@ direct_dependencies:
 - espressif/rmaker_common
 - idf
 - joltwallet/littlefs
-manifest_hash: fe5a71b93a047e5e5bcedf72f2663478b1ded2c5a95d0092e82a70088fbf3cd3
+manifest_hash: d4982e9096cdc1deb27a8d5e9365200810e8d9512678f5f2095695b51e4b2c7b
 target: esp32c3
 version: 2.0.0

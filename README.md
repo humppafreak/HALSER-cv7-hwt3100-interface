@@ -1,5 +1,7 @@
 # HALSER Wind Interface
 
+> **⚠️ Warning: untested on real hardware.** This code has only been built (`pio run`) and never run on an actual HALSER board, CV7, or HWT3100. Protocol details (NMEA 0183 field formats, the HWT3100 Modbus framing/CRC, wiring) have been checked against vendor documentation, but nothing here has been verified against real devices. Test thoroughly before relying on it.
+
 ESP32-C3 firmware for the [HALSER](https://shop.hatlabs.fi/products/halser) board that bridges an **LCJ Capteurs CV7** ultrasonic wind instrument to NMEA 2000 and Signal K networks.
 
 This firmware serves as both a ready-to-use application and a reference example for building custom SensESP-based marine interface firmware.

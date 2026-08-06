@@ -96,6 +96,11 @@ void setup() {
                     ->set_hostname("wind-hdg")
                     ->set_button_pin(kButtonPin)
                     ->enable_ota("thisisfine")
+                    // Explicit rather than relying on SensESP's default
+                    // (which happens to be this same value) — keeps the
+                    // WiFi provisioning AP password in sync with the OTA
+                    // password if either one is ever changed.
+                    ->set_wifi_manager_password("thisisfine")
                     ->get_app();
 
   /////////////////////////////////////////////////////////////////////

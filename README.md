@@ -96,7 +96,7 @@ Unlike some wind instruments, the CV7 exposes no NMEA 0183 command to apply this
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
 
-The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-wind-interface-v1.0.0.bin`](firmware/HALSER-cv7-wind-interface-v1.0.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
+The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-wind-interface-v1.1.0.bin`](firmware/HALSER-cv7-wind-interface-v1.1.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
 
 To flash a downloaded binary onto a device that's already running this firmware:
 

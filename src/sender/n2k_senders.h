@@ -1,10 +1,12 @@
-// Converts apparent wind data to NMEA 2000 PGN 130306 (Wind Data).
-// Uses RepeatExpiring for wind_speed_ and wind_angle_: remembers the last
-// received values but expires them after 5s of no input. Expired values are
-// sent as N2kDoubleNA so the N2K bus always sees messages at the 100ms interval
-// required by the NMEA 2000 standard.
-// Also a ValueProducer: emits a (speed, angle) pair on each successful TX,
-// allowing downstream consumers (like the TX counter) to track activity.
+// Converts apparent wind data to NMEA 2000 PGN 130306 (Wind Data), and
+// fluxgate compass heading to PGN 127250 (Vessel Heading).
+// Uses RepeatExpiring for wind_speed_/wind_angle_/heading_: remembers the
+// last received values but expires them after 5s of no input. Expired
+// values are sent as N2kDoubleNA so the N2K bus always sees messages at the
+// 100ms interval required by the NMEA 2000 standard.
+// Also a ValueProducer: emits a (speed, angle) pair or heading value on
+// each successful TX, allowing downstream consumers (like the TX counter)
+// to track activity.
 
 #ifndef WIND_INTERFACE_SRC_SENDER_N2K_SENDERS_H_
 #define WIND_INTERFACE_SRC_SENDER_N2K_SENDERS_H_
@@ -88,6 +90,47 @@ class N2kWindDataSender
  protected:
   tNMEA2000* nmea2000_;
   tN2kWindReference wind_reference_;
+};
+
+// Vessel Heading (PGN 127250), magnetic reference. The HWT3100 is a
+// fluxgate compass with no GPS input of its own, so it can only report
+// magnetic heading — deviation and variation are left as N2kDoubleNA.
+class N2kHeadingSender : public N2kSender,
+                          public sensesp::ValueProducer<double> {
+ public:
+  N2kHeadingSender(String config_path, tNMEA2000* nmea2000,
+                    bool enable = true)
+      : N2kSender{config_path},
+        nmea2000_{nmea2000},
+        repeat_interval_{100},  // In ms. Dictated by NMEA 2000 standard!
+        expiry_{5000}           // In ms. When the input expires.
+  {
+    if (enable) {
+      this->enable();
+    }
+  }
+
+  void enable() override {
+    if (this->sender_reaction_ == nullptr) {
+      this->sender_reaction_ =
+          sensesp::event_loop()->onRepeat(repeat_interval_, [this]() {
+            tN2kMsg N2kMsg;
+            SetN2kMagneticHeading(N2kMsg, 255, this->heading_.get());
+            this->nmea2000_->SendMsg(N2kMsg);
+            this->emit(this->heading_.get());
+          });
+    }
+  }
+
+  // heading_ depends on repeat_interval_ and expiry_ for initialization,
+  // but those are public API so we keep them all public.
+  unsigned int repeat_interval_;
+  unsigned int expiry_;
+
+  sensesp::RepeatExpiring<double> heading_{repeat_interval_, expiry_};
+
+ protected:
+  tNMEA2000* nmea2000_;
 };
 
 }  // namespace wind_interface

@@ -9,6 +9,14 @@
 // not a public configuration interface). The reference angle offset is
 // therefore applied entirely in software via a LambdaTransform, persisted
 // to the ESP32 filesystem only.
+//
+// Also wires an optional WitMotion HWT3100-TTL/232 fluxgate compass, read
+// over Modbus RTU on a second, non-isolated UART (GPIO 20/21, the HALSER
+// GPIO header) → N2K heading sender (PGN 127250) + Signal K + OLED. The
+// HWT3100 isn't wired to the board's dedicated RS-485/RS-232/UART terminal
+// block because that block's receive side is a single hardware-muxed
+// channel (the RX SEL jumper) already claimed by the CV7's RS-485
+// connection; see hwt3100_heading_reader.h for the sensor's protocol.
 
 #include <NMEA2000_esp32.h>
 
@@ -17,6 +25,7 @@
 
 #include "Wire.h"
 #include "elapsedMillis.h"
+#include "hwt3100_heading_reader.h"
 #include "sender/n2k_senders.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/system/serial_number.h"
@@ -44,6 +53,14 @@ constexpr gpio_num_t kCANRxPin = GPIO_NUM_5;
 constexpr int kI2CSDAPin = 6;
 constexpr int kI2CSCLPin = 7;
 constexpr int kButtonPin = 9;
+// HWT3100 fluxgate compass, wired to the GPIO header rather than the
+// board's dedicated (and already-claimed) NMEA 0183 RX interface — see the
+// file comment above and hwt3100_heading_reader.h. Unlike the isolated
+// serial connectors, GPIO 20/21 are direct, non-isolated ESP32-C3 3.3 V
+// logic; confirm the HWT3100's TTL levels are 3.3 V-tolerant before wiring.
+constexpr int kHeadingBitRate = 9600;
+constexpr gpio_num_t kHeadingTxPin = GPIO_NUM_20;
+constexpr gpio_num_t kHeadingRxPin = GPIO_NUM_21;
 
 ObservableValue<int> n2k_rx_counter = 0;
 ObservableValue<int> n2k_tx_counter = 0;
@@ -59,6 +76,8 @@ void setup() {
   Wire.begin();
 
   Serial1.begin(kWindBitRate, SERIAL_8N1, kUART1RxPin, kUART1TxPin);
+  // UART0 is otherwise idle: the console (Serial) runs over USB CDC.
+  Serial0.begin(kHeadingBitRate, SERIAL_8N1, kHeadingRxPin, kHeadingTxPin);
 
   // SensESP application
   SensESPAppBuilder builder;
@@ -161,6 +180,23 @@ void setup() {
           }));
 
   /////////////////////////////////////////////////////////////////////
+  // NMEA 2000 heading sender (HWT3100 fluxgate compass, optional)
+
+  auto heading_reader =
+      std::make_shared<Hwt3100HeadingReader>(&Serial0);
+
+  auto heading_sender = std::make_shared<N2kHeadingSender>(
+      "/Heading/NMEA2000", nmea2000, true);
+
+  heading_reader->connect_to(&(heading_sender->heading_));
+
+  heading_sender->connect_to(std::make_shared<LambdaConsumer<double>>(
+      [](double) {
+        n2k_tx_counter = n2k_tx_counter.get() + 1;
+        n2k_time_since_tx = 0;
+      }));
+
+  /////////////////////////////////////////////////////////////////////
   // Signal K outputs
 
   auto wind_speed_sk = std::make_shared<SKOutputFloat>(
@@ -173,6 +209,12 @@ void setup() {
 
   wind_parser->apparent_wind_speed_.connect_to(wind_speed_sk);
   reference_angle_transform->connect_to(wind_angle_sk);
+
+  auto heading_sk = std::make_shared<SKOutputFloat>(
+      "navigation.headingMagnetic", "/SK Path/Heading Magnetic",
+      new SKMetadata("rad", "Magnetic Heading"));
+
+  heading_reader->connect_to(heading_sk);
 
   /////////////////////////////////////////////////////////////////////
   // Configuration elements
@@ -225,6 +267,7 @@ void setup() {
       &(display->apparent_wind_speed_consumer));
   reference_angle_transform->connect_to(
       &(display->apparent_wind_angle_consumer));
+  heading_reader->connect_to(&(display->heading_consumer));
 
   while (true) {
     loop();

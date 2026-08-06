@@ -50,6 +50,13 @@ class InfoDisplay {
       this->apparent_wind_angle_ -= 360;
     }
   }};
+  // Heading (optional, from the HWT3100 if connected). Left at its default
+  // of 0 (shown as "0.0 deg") when no reading has ever arrived, same as
+  // the wind fields.
+  sensesp::LambdaConsumer<float> heading_consumer{[this](float value) {
+    // Convert radians to degrees, 0-360.
+    this->heading_ = value * 180 / M_PI;
+  }};
 
  private:
   Adafruit_SSD1306* display_;
@@ -57,6 +64,8 @@ class InfoDisplay {
   float apparent_wind_speed_ = 0;
   // Wind angle, in degrees from -180 to 180, where 0 is straight ahead.
   float apparent_wind_angle_ = 0;
+  // Magnetic heading, in degrees from 0 to 360.
+  float heading_ = 0;
 
   void clear_row(int row);
   void print_row(int row, String value);
@@ -71,6 +80,8 @@ class InfoDisplay {
     print_row(4, row_buf);
     snprintf(row_buf, sizeof(row_buf), "AWA: %.1f deg", apparent_wind_angle_);
     print_row(5, row_buf);
+    snprintf(row_buf, sizeof(row_buf), "HDG: %.1f deg", heading_);
+    print_row(6, row_buf);
     display_->display();
   }
 };

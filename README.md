@@ -11,7 +11,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 - Outputs wind data to Signal K via WiFi/WebSocket
 - Configurable reference angle offset via web UI (wind vane alignment, applied entirely in software)
 - Optional HWT3100 fluxgate compass support: polls magnetic heading over Modbus RTU, transmits NMEA 2000 PGN 127250 (Vessel Heading) and Signal K `navigation.headingMagnetic`
-- OLED display showing hostname, IP, uptime, wind speed, and wind angle
+- OLED display showing hostname, IP, uptime, wind speed, wind angle, and (if the HWT3100 is connected) magnetic heading
 - RGB LED activity indicator
 - OTA firmware updates
 - NMEA 2000 watchdog with configurable auto-reboot
@@ -114,6 +114,7 @@ If connected, a 128x64 SSD1306 OLED display shows:
 - *(blank line)*
 - Apparent wind speed (m/s)
 - Apparent wind angle (degrees, -180 to +180)
+- Magnetic heading (degrees, 0 to 360) — reads 0.0 until an HWT3100 heading is received, since it's not connected/expiry-aware like the N2K senders
 
 ## Architecture
 
@@ -139,7 +140,8 @@ HWT3100 (Modbus RTU, 9600 bit/s, optional)
   ▼
 Hwt3100HeadingReader (dedicated FreeRTOS task, polls MAGX..YAW register block)
   ├── N2kHeadingSender → NMEA 2000 bus (TWAI, GPIO 4/5), PGN 127250
-  └── SKOutputFloat    → Signal K server (navigation.headingMagnetic)
+  ├── SKOutputFloat    → Signal K server (navigation.headingMagnetic)
+  └── InfoDisplay      → OLED (heading)
 ```
 
 The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which provides WiFi connectivity, a web UI for configuration, Signal K protocol support, and OTA updates.

@@ -12,11 +12,11 @@
 //
 // Also wires an optional WitMotion HWT3100-TTL/232 fluxgate compass, read
 // over Modbus RTU on a second, non-isolated UART (GPIO 20/21, the HALSER
-// GPIO header) → N2K heading sender (PGN 127250) + Signal K. The HWT3100
-// isn't wired to the board's dedicated RS-485/RS-232/UART terminal block
-// because that block's receive side is a single hardware-muxed channel
-// (the RX SEL jumper) already claimed by the CV7's RS-485 connection; see
-// hwt3100_heading_reader.h for the sensor's protocol.
+// GPIO header) → N2K heading sender (PGN 127250) + Signal K + OLED. The
+// HWT3100 isn't wired to the board's dedicated RS-485/RS-232/UART terminal
+// block because that block's receive side is a single hardware-muxed
+// channel (the RX SEL jumper) already claimed by the CV7's RS-485
+// connection; see hwt3100_heading_reader.h for the sensor's protocol.
 
 #include <NMEA2000_esp32.h>
 
@@ -267,6 +267,7 @@ void setup() {
       &(display->apparent_wind_speed_consumer));
   reference_angle_transform->connect_to(
       &(display->apparent_wind_angle_consumer));
+  heading_reader->connect_to(&(display->heading_consumer));
 
   while (true) {
     loop();

@@ -36,6 +36,7 @@ HWT3100 (Modbus RTU, 9600 bit/s, GPIO 21 RX / GPIO 20 TX, optional)
     → N2kHeadingSender (PGN 127250, 100ms interval)
       → tNMEA2000_esp32 (TWAI, GPIO 4 TX / GPIO 5 RX)
     → Signal K output (navigation.headingMagnetic, via WiFi/WebSocket)
+    → SSD1306 OLED display (heading)
 
 Web UI ←→ Reference angle transform (persisted to ESP32 filesystem only)
 ```
@@ -47,7 +48,7 @@ Web UI ←→ Reference angle transform (persisted to ESP32 filesystem only)
 
 **Application** (`src/`):
 - `main.cpp` — Entry point; initializes all components and wires the data pipeline, including the reference angle `LambdaTransform`
-- `ssd1306_display.h/.cpp` — OLED display driver (hostname, IP, uptime, AWS, AWA; updates every 1 second)
+- `ssd1306_display.h/.cpp` — OLED display driver (hostname, IP, uptime, AWS, AWA, HDG; updates every 1 second)
 - `hwt3100_heading_reader.h` — Modbus RTU master (dedicated FreeRTOS task) that polls the HWT3100 fluxgate compass for magnetic heading
 
 ### Hardware Pin Assignments

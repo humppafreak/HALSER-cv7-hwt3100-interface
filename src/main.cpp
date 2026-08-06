@@ -17,6 +17,15 @@
 // block because that block's receive side is a single hardware-muxed
 // channel (the RX SEL jumper) already claimed by the CV7's RS-485
 // connection; see hwt3100_heading_reader.h for the sensor's protocol.
+//
+// Also adds a UDP NMEA 0183 broadcast output (port 10110) alongside N2K and
+// Signal K — see udp_nmea0183_sender.h.
+//
+// Both inputs (wind, heading) and all three outputs (Signal K, N2K, UDP)
+// have independent, live-toggleable web UI checkboxes (see enabled_gate.h
+// and the "Enable/disable toggles" section below) — disabling an input
+// silences it on every output at once, while disabling one output leaves
+// the others (and the input) unaffected.
 
 #include <NMEA2000_esp32.h>
 
@@ -25,6 +34,7 @@
 
 #include "Wire.h"
 #include "elapsedMillis.h"
+#include "enabled_gate.h"
 #include "hwt3100_heading_reader.h"
 #include "sender/n2k_senders.h"
 #include "sender/udp_nmea0183_sender.h"
@@ -88,6 +98,48 @@ void setup() {
                     ->enable_ota("thisisfine")
                     ->get_app();
 
+  /////////////////////////////////////////////////////////////////////
+  // Enable/disable toggles for both inputs and all three outputs. Each is
+  // read live (not just at startup), via EnabledGate for inputs and Signal
+  // K, or an output_enabled_config passed straight into the N2K/UDP
+  // senders — so toggling any of these in the web UI takes effect
+  // immediately, no device restart required.
+
+  auto enable_wind_input_config = std::make_shared<CheckboxConfig>(
+      true, "Enable Wind Input (CV7)", "/Input/Enable Wind");
+  ConfigItem(enable_wind_input_config)
+      ->set_title("Enable Wind Input (CV7)")
+      ->set_description(
+          "While disabled, CV7 wind data is not forwarded to any output.")
+      ->set_sort_order(10);
+
+  auto enable_heading_input_config = std::make_shared<CheckboxConfig>(
+      true, "Enable Heading Input (HWT3100)", "/Input/Enable Heading");
+  ConfigItem(enable_heading_input_config)
+      ->set_title("Enable Heading Input (HWT3100)")
+      ->set_description(
+          "While disabled, HWT3100 heading data is not forwarded to any "
+          "output.")
+      ->set_sort_order(20);
+
+  auto enable_signalk_output_config = std::make_shared<CheckboxConfig>(
+      true, "Enable Signal K Output", "/Output/Enable SignalK");
+  ConfigItem(enable_signalk_output_config)
+      ->set_title("Enable Signal K Output")
+      ->set_sort_order(30);
+
+  auto enable_n2k_output_config = std::make_shared<CheckboxConfig>(
+      true, "Enable NMEA 2000 Output", "/Output/Enable N2K");
+  ConfigItem(enable_n2k_output_config)
+      ->set_title("Enable NMEA 2000 Output")
+      ->set_sort_order(40);
+
+  auto enable_udp_output_config = std::make_shared<CheckboxConfig>(
+      true, "Enable UDP NMEA 0183 Output", "/Output/Enable UDP");
+  ConfigItem(enable_udp_output_config)
+      ->set_title("Enable UDP NMEA 0183 Output")
+      ->set_sort_order(50);
+
   // NMEA 0183 I/O task
   auto nmea0183_io_task = std::make_shared<NMEA0183IOTask>(&Serial1);
 
@@ -98,6 +150,16 @@ void setup() {
   // unmodified with the CV7's output.
   auto wind_parser =
       std::make_shared<WIMWVSentenceParser>(&(nmea0183_io_task->parser_));
+
+  // Input gates — every consumer of wind/heading data below reads from
+  // these, not from wind_parser/heading_reader directly, so the input
+  // toggles above uniformly control all outputs at once.
+  auto wind_speed_gate = std::make_shared<EnabledGate<float>>(
+      enable_wind_input_config.get());
+  auto wind_angle_gate = std::make_shared<EnabledGate<float>>(
+      enable_wind_input_config.get());
+  wind_parser->apparent_wind_speed_.connect_to(wind_speed_gate);
+  wind_parser->apparent_wind_angle_.connect_to(wind_angle_gate);
 
   // Reference angle offset — corrects for misalignment between the CV7's
   // mounting orientation and the vessel's centerline. The CV7 has no NMEA
@@ -126,6 +188,8 @@ void setup() {
           "Enter the angle readout when the wind vane is pointing "
           "straight ahead.")
       ->set_sort_order(300);
+
+  wind_angle_gate->connect_to(reference_angle_transform);
 
   /////////////////////////////////////////////////////////////////////
   // Initialize NMEA 2000 functionality
@@ -165,12 +229,12 @@ void setup() {
   // NMEA 2000 wind data sender
 
   auto wind_data_sender = std::make_shared<N2kWindDataSender>(
-      "/Wind/NMEA2000", tN2kWindReference::N2kWind_Apparent, nmea2000, true);
+      "/Wind/NMEA2000", tN2kWindReference::N2kWind_Apparent, nmea2000, true,
+      enable_n2k_output_config.get());
 
-  // Wire wind parser outputs to N2K sender. Wind angle is routed through the
-  // reference angle offset transform first.
-  wind_parser->apparent_wind_speed_.connect_to(&(wind_data_sender->wind_speed_));
-  wind_parser->apparent_wind_angle_.connect_to(reference_angle_transform);
+  // Wire the (input-gated) wind values to the N2K sender. Wind angle is
+  // routed through the reference angle offset transform first.
+  wind_speed_gate->connect_to(&(wind_data_sender->wind_speed_));
   reference_angle_transform->connect_to(&(wind_data_sender->wind_angle_));
 
   wind_data_sender->connect_to(
@@ -186,10 +250,16 @@ void setup() {
   auto heading_reader =
       std::make_shared<Hwt3100HeadingReader>(&Serial0);
 
-  auto heading_sender = std::make_shared<N2kHeadingSender>(
-      "/Heading/NMEA2000", nmea2000, true);
+  // Input gate — see the wind speed/angle gates above for why every
+  // consumer below reads from this rather than heading_reader directly.
+  auto heading_gate = std::make_shared<EnabledGate<float>>(
+      enable_heading_input_config.get());
+  heading_reader->connect_to(heading_gate);
 
-  heading_reader->connect_to(&(heading_sender->heading_));
+  auto heading_sender = std::make_shared<N2kHeadingSender>(
+      "/Heading/NMEA2000", nmea2000, true, enable_n2k_output_config.get());
+
+  heading_gate->connect_to(&(heading_sender->heading_));
 
   heading_sender->connect_to(std::make_shared<LambdaConsumer<double>>(
       [](double) {
@@ -208,27 +278,39 @@ void setup() {
       "environment.wind.angleApparent", "/SK Path/Apparent Wind Angle",
       new SKMetadata("rad", "Apparent Wind Angle"));
 
-  wind_parser->apparent_wind_speed_.connect_to(wind_speed_sk);
-  reference_angle_transform->connect_to(wind_angle_sk);
-
   auto heading_sk = std::make_shared<SKOutputFloat>(
       "navigation.headingMagnetic", "/SK Path/Heading Magnetic",
       new SKMetadata("rad", "Magnetic Heading"));
 
-  heading_reader->connect_to(heading_sk);
+  // Output gates — SKOutputFloat is a third-party type we can't add an
+  // internal enabled_ check to, so gate it externally instead, same as the
+  // input gates above but keyed off the Signal K output toggle.
+  auto sk_wind_speed_gate = std::make_shared<EnabledGate<float>>(
+      enable_signalk_output_config.get());
+  auto sk_wind_angle_gate = std::make_shared<EnabledGate<float>>(
+      enable_signalk_output_config.get());
+  auto sk_heading_gate = std::make_shared<EnabledGate<float>>(
+      enable_signalk_output_config.get());
+
+  wind_speed_gate->connect_to(sk_wind_speed_gate);
+  sk_wind_speed_gate->connect_to(wind_speed_sk);
+  reference_angle_transform->connect_to(sk_wind_angle_gate);
+  sk_wind_angle_gate->connect_to(wind_angle_sk);
+  heading_gate->connect_to(sk_heading_gate);
+  sk_heading_gate->connect_to(heading_sk);
 
   /////////////////////////////////////////////////////////////////////
   // UDP NMEA 0183 output (broadcast, port 10110) — an additional output
   // for chartplotter apps (e.g. OpenCPN) that can consume NMEA 0183 over
   // the network directly, without a Signal K server in between.
 
-  auto udp_nmea0183_sender = std::make_shared<UdpNmea0183Sender>();
+  auto udp_nmea0183_sender =
+      std::make_shared<UdpNmea0183Sender>(enable_udp_output_config.get());
 
-  wind_parser->apparent_wind_speed_.connect_to(
-      &(udp_nmea0183_sender->wind_speed_consumer));
+  wind_speed_gate->connect_to(&(udp_nmea0183_sender->wind_speed_consumer));
   reference_angle_transform->connect_to(
       &(udp_nmea0183_sender->wind_angle_consumer));
-  heading_reader->connect_to(&(udp_nmea0183_sender->heading_consumer));
+  heading_gate->connect_to(&(udp_nmea0183_sender->heading_consumer));
 
   /////////////////////////////////////////////////////////////////////
   // Configuration elements
@@ -277,11 +359,10 @@ void setup() {
   // OLED display
 
   auto display = std::make_shared<InfoDisplay>(&Wire);
-  wind_parser->apparent_wind_speed_.connect_to(
-      &(display->apparent_wind_speed_consumer));
+  wind_speed_gate->connect_to(&(display->apparent_wind_speed_consumer));
   reference_angle_transform->connect_to(
       &(display->apparent_wind_angle_consumer));
-  heading_reader->connect_to(&(display->heading_consumer));
+  heading_gate->connect_to(&(display->heading_consumer));
 
   while (true) {
     loop();

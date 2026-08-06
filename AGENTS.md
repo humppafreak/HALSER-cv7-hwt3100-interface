@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-HALSER wind interface firmware — an ESP32-C3 firmware that bridges an LCJ Capteurs CV7 ultrasonic wind instrument to NMEA 2000 and Signal K networks via the HALSER board. Optionally also bridges a WitMotion HWT3100-TTL/232 fluxgate compass for magnetic heading. Also serves as a reference implementation for SensESP-based marine interface firmware.
+HALSER wind interface firmware — an ESP32-C3 firmware that bridges an LCJ Capteurs CV7 ultrasonic wind instrument to NMEA 2000, Signal K, and UDP NMEA 0183 broadcast, via the HALSER board. Optionally also bridges a WitMotion HWT3100-TTL/232 fluxgate compass for magnetic heading. Both inputs and all three outputs have independent, live-toggleable web UI enable/disable checkboxes. Also serves as a reference implementation for SensESP-based marine interface firmware.
 
 ## Build Commands
 
@@ -25,31 +25,39 @@ pio device monitor
 CV7 (NMEA 0183, 4800 bit/s, GPIO 3 RX / GPIO 2 TX unused)
   → NMEA0183IOTask (dedicated FreeRTOS task)
     → WIMWVSentenceParser (apparent wind speed + angle, matches $IIMWV)
-      → Reference angle offset (LambdaTransform, software-only)
-        → N2kWindDataSender (PGN 130306, 100ms interval)
-          → tNMEA2000_esp32 (TWAI, GPIO 4 TX / GPIO 5 RX)
-        → Signal K output (via WiFi/WebSocket)
-        → SSD1306 OLED display (hostname, IP, uptime, AWS, AWA)
+      → EnabledGate (Enable Wind Input, live-checked)
+        → Reference angle offset (LambdaTransform, software-only)
+          → N2kWindDataSender (PGN 130306, 100ms; checks Enable N2K live)
+            → tNMEA2000_esp32 (TWAI, GPIO 4 TX / GPIO 5 RX)
+          → EnabledGate (Enable Signal K) → Signal K output (via WiFi/WebSocket)
+          → UdpNmea0183Sender ($IIMWV, checks Enable UDP live) → UDP broadcast :10110
+          → SSD1306 OLED display (hostname, IP, uptime, AWS, AWA)
 
 HWT3100 (Modbus RTU, 9600 bit/s, GPIO 21 RX / GPIO 20 TX, optional)
   → Hwt3100HeadingReader (dedicated FreeRTOS task, polls MAGX..YAW block)
-    → N2kHeadingSender (PGN 127250, 100ms interval)
-      → tNMEA2000_esp32 (TWAI, GPIO 4 TX / GPIO 5 RX)
-    → Signal K output (navigation.headingMagnetic, via WiFi/WebSocket)
-    → SSD1306 OLED display (heading)
+    → EnabledGate (Enable Heading Input, live-checked)
+      → N2kHeadingSender (PGN 127250, 100ms; checks Enable N2K live)
+        → tNMEA2000_esp32 (TWAI, GPIO 4 TX / GPIO 5 RX)
+      → EnabledGate (Enable Signal K) → Signal K output (navigation.headingMagnetic)
+      → UdpNmea0183Sender ($HCHDM, checks Enable UDP live) → UDP broadcast :10110
+      → SSD1306 OLED display (heading)
 
-Web UI ←→ Reference angle transform (persisted to ESP32 filesystem only)
+Web UI ←→ Reference angle transform, 5 enable/disable toggles (persisted to ESP32 filesystem only)
 ```
+
+All five toggles (2 inputs, 3 outputs) apply live — `EnabledGate` and the N2K/UDP senders' internal `output_enabled_config` both read their `CheckboxConfig` on every value/send cycle rather than caching at boot, so no restart is needed.
 
 ### Source Layout
 
 **NMEA 2000 Output** (`src/sender/`):
-- `n2k_senders.h` — `N2kWindDataSender` (PGN 130306) and `N2kHeadingSender` (PGN 127250), both at 100ms interval, use RepeatExpiring (5s timeout) to send N2kDoubleNA for stale data; both are also ValueProducers that emit on TX for downstream consumers
+- `n2k_senders.h` — `N2kWindDataSender` (PGN 130306) and `N2kHeadingSender` (PGN 127250), both at 100ms interval, use RepeatExpiring (5s timeout) to send N2kDoubleNA for stale data; both are also ValueProducers that emit on TX for downstream consumers; both take an optional `CheckboxConfig*` (checked live each send cycle) to gate transmission entirely
+- `udp_nmea0183_sender.h` — `UdpNmea0183Sender`: broadcasts synthesized `$IIMWV`/`$HCHDM` sentences on UDP port 10110 once per second, using plain `WiFiUDP`; same optional live `CheckboxConfig*` gating as the N2K senders
 
 **Application** (`src/`):
-- `main.cpp` — Entry point; initializes all components and wires the data pipeline, including the reference angle `LambdaTransform`
+- `main.cpp` — Entry point; initializes all components and wires the data pipeline, including the reference angle `LambdaTransform` and the 5 enable/disable toggles
 - `ssd1306_display.h/.cpp` — OLED display driver (hostname, IP, uptime, AWS, AWA, HDG; updates every 1 second)
 - `hwt3100_heading_reader.h` — Modbus RTU master (dedicated FreeRTOS task) that polls the HWT3100 fluxgate compass for magnetic heading
+- `enabled_gate.h` — `EnabledGate<T>`, a pass-through `ValueConsumer`/`ValueProducer` that only forwards a value while its `CheckboxConfig` is checked (read live, not cached); used for the two input toggles and the Signal K output toggle, since `SKOutputFloat` is a third-party type with no internal enabled flag to add
 
 ### Hardware Pin Assignments
 

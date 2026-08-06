@@ -14,6 +14,9 @@
 // The broadcast address is recomputed from WiFi.localIP()/subnetMask() on
 // every send rather than cached, so it stays correct across reconnects
 // without needing a network-state hook.
+//
+// output_enabled_config (see the constructor) is an optional live toggle:
+// while unchecked, send() is a no-op, so nothing is broadcast.
 
 #ifndef WIND_INTERFACE_SRC_SENDER_UDP_NMEA0183_SENDER_H_
 #define WIND_INTERFACE_SRC_SENDER_UDP_NMEA0183_SENDER_H_
@@ -24,15 +27,19 @@
 #include <cmath>
 
 #include "sensesp/system/lambda_consumer.h"
+#include "sensesp/ui/ui_controls.h"
 #include "sensesp_base_app.h"
 
 namespace wind_interface {
 
 class UdpNmea0183Sender {
  public:
-  explicit UdpNmea0183Sender(unsigned int repeat_interval_ms = 1000,
-                              uint16_t port = 10110)
-      : port_{port} {
+  // output_enabled_config, if given, is checked live on every send cycle
+  // (not just at construction) so a web UI toggle takes effect immediately.
+  explicit UdpNmea0183Sender(
+      sensesp::CheckboxConfig* output_enabled_config = nullptr,
+      unsigned int repeat_interval_ms = 1000, uint16_t port = 10110)
+      : port_{port}, output_enabled_config_{output_enabled_config} {
     sensesp::event_loop()->onRepeat(repeat_interval_ms,
                                      [this]() { this->send(); });
   }
@@ -48,6 +55,7 @@ class UdpNmea0183Sender {
 
  private:
   uint16_t port_;
+  sensesp::CheckboxConfig* output_enabled_config_;
   WiFiUDP udp_;
 
   float wind_speed_ = 0;  // m/s
@@ -89,6 +97,10 @@ class UdpNmea0183Sender {
   }
 
   void send() {
+    if (output_enabled_config_ != nullptr &&
+        !output_enabled_config_->get_value()) {
+      return;
+    }
     float wind_angle_degrees =
         wind_angle_ * 180.0f / static_cast<float>(M_PI);
     char body[64];

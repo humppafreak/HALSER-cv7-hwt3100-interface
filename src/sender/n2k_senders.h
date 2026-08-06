@@ -21,6 +21,7 @@
 #include "sensesp/system/saveable.h"
 #include "sensesp/system/serializable.h"
 #include "sensesp/transforms/repeat.h"
+#include "sensesp/ui/ui_controls.h"
 
 namespace wind_interface {
 
@@ -51,11 +52,17 @@ class N2kWindDataSender
     : public N2kSender,
       public sensesp::ValueProducer<std::pair<double, double>> {
  public:
+  // output_enabled_config, if given, is checked live on every send cycle
+  // (not just at construction) so a web UI toggle takes effect immediately:
+  // while unchecked, this PGN simply isn't transmitted, rather than being
+  // sent as N2kDoubleNA.
   N2kWindDataSender(String config_path, tN2kWindReference wind_reference,
-                    tNMEA2000* nmea2000, bool enable = true)
+                    tNMEA2000* nmea2000, bool enable = true,
+                    sensesp::CheckboxConfig* output_enabled_config = nullptr)
       : N2kSender{config_path},
         wind_reference_{wind_reference},
         nmea2000_{nmea2000},
+        output_enabled_config_{output_enabled_config},
         repeat_interval_{100},  // In ms. Dictated by NMEA 2000 standard!
         expiry_{5000}           // In ms. When the inputs expire.
   {
@@ -68,6 +75,10 @@ class N2kWindDataSender
     if (this->sender_reaction_ == nullptr) {
       this->sender_reaction_ =
           sensesp::event_loop()->onRepeat(repeat_interval_, [this]() {
+            if (this->output_enabled_config_ != nullptr &&
+                !this->output_enabled_config_->get_value()) {
+              return;
+            }
             tN2kMsg N2kMsg;
             SetN2kWindSpeed(N2kMsg, 255, this->wind_speed_.get(),
                             this->wind_angle_.get(), this->wind_reference_);
@@ -90,6 +101,7 @@ class N2kWindDataSender
  protected:
   tNMEA2000* nmea2000_;
   tN2kWindReference wind_reference_;
+  sensesp::CheckboxConfig* output_enabled_config_;
 };
 
 // Vessel Heading (PGN 127250), magnetic reference. The HWT3100 is a
@@ -98,10 +110,16 @@ class N2kWindDataSender
 class N2kHeadingSender : public N2kSender,
                           public sensesp::ValueProducer<double> {
  public:
+  // output_enabled_config, if given, is checked live on every send cycle
+  // (not just at construction) so a web UI toggle takes effect immediately:
+  // while unchecked, this PGN simply isn't transmitted, rather than being
+  // sent as N2kDoubleNA.
   N2kHeadingSender(String config_path, tNMEA2000* nmea2000,
-                    bool enable = true)
+                    bool enable = true,
+                    sensesp::CheckboxConfig* output_enabled_config = nullptr)
       : N2kSender{config_path},
         nmea2000_{nmea2000},
+        output_enabled_config_{output_enabled_config},
         repeat_interval_{100},  // In ms. Dictated by NMEA 2000 standard!
         expiry_{5000}           // In ms. When the input expires.
   {
@@ -114,6 +132,10 @@ class N2kHeadingSender : public N2kSender,
     if (this->sender_reaction_ == nullptr) {
       this->sender_reaction_ =
           sensesp::event_loop()->onRepeat(repeat_interval_, [this]() {
+            if (this->output_enabled_config_ != nullptr &&
+                !this->output_enabled_config_->get_value()) {
+              return;
+            }
             tN2kMsg N2kMsg;
             SetN2kMagneticHeading(N2kMsg, 255, this->heading_.get());
             this->nmea2000_->SendMsg(N2kMsg);
@@ -131,6 +153,7 @@ class N2kHeadingSender : public N2kSender,
 
  protected:
   tNMEA2000* nmea2000_;
+  sensesp::CheckboxConfig* output_enabled_config_;
 };
 
 }  // namespace wind_interface

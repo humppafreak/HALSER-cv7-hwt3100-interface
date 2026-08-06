@@ -10,6 +10,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 - Transmits wind data as NMEA 2000 PGN 130306 (Wind Data) at 100ms intervals
 - Outputs wind data to Signal K via WiFi/WebSocket
 - Configurable reference angle offset via web UI (wind vane alignment, applied entirely in software)
+- Optional HWT3100 fluxgate compass support: polls magnetic heading over Modbus RTU, transmits NMEA 2000 PGN 127250 (Vessel Heading) and Signal K `navigation.headingMagnetic`
 - OLED display showing hostname, IP, uptime, wind speed, and wind angle
 - RGB LED activity indicator
 - OTA firmware updates
@@ -21,6 +22,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 - [LCJ Capteurs CV7](https://lcjcapteurs.com/) ultrasonic wind instrument
 - NMEA 2000 network connection
 - Optional: SSD1306 128x64 OLED display (I2C)
+- Optional: WitMotion HWT3100-TTL/232 fluxgate compass
 
 ## Wiring
 
@@ -34,8 +36,26 @@ This firmware serves as both a ready-to-use application and a reference example 
 | GPIO 7 | I2C SCL (OLED display) |
 | GPIO 8 | RGB LED (SK6805) |
 | GPIO 9 | Button |
+| GPIO 20 | UART0 TX → HWT3100 RX (optional fluxgate compass) |
+| GPIO 21 | UART0 RX ← HWT3100 TX (optional fluxgate compass) |
 
 The CV7 communicates via NMEA 0183 at 4800 bit/s (8N1), transmit-only — it accepts no configuration commands over the serial link.
+
+### HWT3100 Fluxgate Compass (Optional)
+
+An optional WitMotion HWT3100-TTL/232 fluxgate compass can be connected for magnetic heading. It does **not** go on HALSER's dedicated NMEA 0183/RS-232/UART terminal block — that block's receive side is a single hardware-muxed channel selected by the **RX SEL** jumper, and the CV7 already occupies it (jumper on **N**, RS-485). Instead, the HWT3100 is wired directly to the ESP32-C3 GPIO header:
+
+| HWT3100 Wire | HALSER Connection |
+|--------------|--------------------|
+| VCC (red) | **Vin** connector (5–36 V, matches the HWT3100's input range) |
+| TX (yellow) | GPIO 21 (UART0 RX) |
+| RX (green) | GPIO 20 (UART0 TX) |
+| GND (black) | GND |
+
+!!! note
+    GPIO 20/21 are direct, non-isolated 3.3 V ESP32-C3 logic — unlike the board's dedicated serial connectors, this path has no galvanic isolation or level shifting. Confirm the HWT3100's TTL logic levels are 3.3 V-tolerant before wiring.
+
+The HWT3100 does not speak NMEA 0183; it uses a proprietary AT-command/Modbus RTU protocol at 9600 bit/s (default). This firmware switches it into Modbus mode on boot and polls it as a Modbus RTU master — see [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for details. Heading is transmitted as NMEA 2000 PGN 127250 (Vessel Heading, magnetic reference) and Signal K `navigation.headingMagnetic`.
 
 ## Usage
 
@@ -83,7 +103,7 @@ An optional watchdog can be enabled in the web UI under **Enable NMEA 2000 Watch
 
 ### NMEA 2000 Stale Data Handling
 
-The N2K sender uses `RepeatExpiring` to handle stale wind data. If no new wind measurement arrives within 5 seconds, the sender transmits `N2kDoubleNA` ("not available") values instead of repeating stale data. PGN 130306 messages continue at 100ms regardless — downstream devices always see a consistent message rate and can distinguish "no data" from silence.
+The N2K senders use `RepeatExpiring` to handle stale data. If no new wind measurement (or, when the HWT3100 is connected, heading reading) arrives within 5 seconds, the sender transmits `N2kDoubleNA` ("not available") values instead of repeating stale data. PGN 130306 and 127250 messages continue at 100ms regardless — downstream devices always see a consistent message rate and can distinguish "no data" from silence.
 
 ### OLED Display
 
@@ -112,6 +132,14 @@ NMEA0183IOTask
         └── InfoDisplay             → OLED (speed)
 
 Web UI (SensESP) ──── Reference angle transform ──── Filesystem (persistent storage)
+
+HWT3100 (Modbus RTU, 9600 bit/s, optional)
+  │
+  │ UART0 (GPIO 20/21, non-isolated GPIO header)
+  ▼
+Hwt3100HeadingReader (dedicated FreeRTOS task, polls MAGX..YAW register block)
+  ├── N2kHeadingSender → NMEA 2000 bus (TWAI, GPIO 4/5), PGN 127250
+  └── SKOutputFloat    → Signal K server (navigation.headingMagnetic)
 ```
 
 The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which provides WiFi connectivity, a web UI for configuration, Signal K protocol support, and OTA updates.
@@ -122,7 +150,9 @@ The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which pr
 
 **Software-only calibration:** The reference angle offset is a `LambdaTransform` with a single configurable parameter, persisted to the ESP32 filesystem. Because the CV7 has no NMEA 0183 command channel, there is no device-side equivalent to keep in sync — unlike instruments (such as the Autonnic A5120 this codebase originally targeted) that accept serial configuration commands.
 
-**NMEA 2000 value expiry:** The `N2kWindDataSender` wraps inputs in `RepeatExpiring<double>`, which returns `N2kDoubleNA` when the source value is older than 5 seconds. This prevents stale wind data from being transmitted as valid measurements while maintaining the 100ms PGN 130306 transmission rate.
+**NMEA 2000 value expiry:** The `N2kWindDataSender` and `N2kHeadingSender` wrap inputs in `RepeatExpiring<double>`, which returns `N2kDoubleNA` when the source value is older than 5 seconds. This prevents stale data from being transmitted as valid measurements while maintaining the 100ms PGN transmission rate.
+
+**Dedicated FreeRTOS tasks for blocking I/O:** Both the CV7 (`NMEA0183IOTask`) and the HWT3100 (`Hwt3100HeadingReader`) run their serial I/O on their own FreeRTOS task rather than the ReactESP event loop, since each read cycle blocks waiting on the UART. `ValueProducer::emit()` is called directly from those tasks — safe here because the ESP32-C3 is single-core, so there's no real concurrency to guard against, only preemption.
 
 ## Code Structure
 
@@ -130,7 +160,7 @@ The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which pr
 
 | File | Purpose |
 |------|---------|
-| `n2k_senders.h` | `N2kWindDataSender` — PGN 130306 at 100ms with `RepeatExpiring` for stale data |
+| `n2k_senders.h` | `N2kWindDataSender` (PGN 130306) and `N2kHeadingSender` (PGN 127250), both at 100ms with `RepeatExpiring` for stale data |
 
 ### Application
 
@@ -138,6 +168,7 @@ The firmware is built on [SensESP](https://github.com/SignalK/SensESP), which pr
 |------|---------|
 | `main.cpp` | Entry point — wires all components together, including the reference angle `LambdaTransform` |
 | `ssd1306_display.h/.cpp` | OLED display driver (hostname, IP, uptime, AWS, AWA) |
+| `hwt3100_heading_reader.h` | Modbus RTU master polling the HWT3100 fluxgate compass for magnetic heading |
 
 ### CV7 Protocol
 
@@ -152,6 +183,22 @@ SensESP's built-in `WIMWVSentenceParser` matches the `MWV` formatter regardless 
 
 The CV7 also emits undocumented `$PLCJ,...` / `$PLCJEA...` sentences described only as "for LCJ Capteurs technical service" — this firmware does not use them, and the CV7 has no public NMEA 0183 command interface for configuration (unlike the Autonnic A5120, which accepted `$PATC,IIMWV,AHD/DWD/DSP/TXP` commands with ACK confirmation).
 
+### HWT3100 Protocol
+
+The HWT3100-TTL/232 does not speak NMEA 0183. Per its manual, it has two serial modes, switched with an `AT+MODE=` command:
+
+- **ASCII mode** (factory default) — AT commands (`AT+PRATE`, `AT+CALI`, etc.); the continuous streaming line format isn't documented byte-for-byte, so this firmware doesn't use it.
+- **Modbus RTU mode** — standard Modbus read/write frames (function `0x03` read, `0x06` write), fully documented with a worked byte example and CRC16 in the manual.
+
+This firmware sends `AT+MODE=1` once on boot to force Modbus mode — the manual documents that command as being accepted regardless of the sensor's current mode, so it's safe to send unconditionally — then polls as a Modbus RTU master, reading the 4-register block starting at `0xDB` (MAGX, MAGY, MAGZ, YAW) every 200ms and using only the YAW (heading) register:
+
+| Register | Address | Description |
+|----------|---------|-------------|
+| MAGX / MAGY / MAGZ | 0xDB–0xDD | Magnetic field, X/Y/Z axes (not used by this firmware) |
+| YAW | 0xDE | Heading, signed int16, 0.1° units |
+
+See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the full request/response framing and CRC.
+
 ### NMEA 2000 Device Identity
 
 | Field | Value |
@@ -159,8 +206,9 @@ The CV7 also emits undocumented `$PLCJ,...` / `$PLCJEA...` sentences described o
 | Device function | 130 (Weather Instruments) |
 | Device class | 85 (Sensor Communication Interface) |
 | Manufacturer code | 2046 |
-| Transmitted PGN | 130306 (Wind Data) |
+| Transmitted PGNs | 130306 (Wind Data), 127250 (Vessel Heading) |
 | Wind reference | Apparent |
+| Heading reference | Magnetic |
 
 ## Building
 
@@ -189,10 +237,12 @@ This firmware demonstrates several patterns useful for building custom SensESP m
 2. **Software-only calibration** — A `LambdaTransform` with persisted config for devices with no command channel
 3. **NMEA 2000 output with value expiry** — `RepeatExpiring` prevents stale data transmission while maintaining constant PGN rate
 4. **Producer/Consumer pipeline** — Connecting a single data source (wind parser) to multiple sinks (N2K, Signal K, OLED)
+5. **Non-NMEA-0183 devices** — `Hwt3100HeadingReader` shows the pattern for a device that speaks a different serial protocol entirely (Modbus RTU): a custom `ValueProducer` running its own FreeRTOS task, polling on its own schedule, that plugs into the same N2K/Signal K sender pattern as the NMEA 0183-based wind path
 
 To adapt this for a different device:
 - Modify or replace `WIMWVSentenceParser` if your device uses different NMEA 0183 sentences
 - If your device accepts NMEA 0183 configuration commands, replace the `LambdaTransform`-based reference angle with a command/ACK pattern (persist to filesystem, send the command, wait on a `SemaphoreValue` for the response)
+- If your device doesn't speak NMEA 0183 at all, write a custom `ValueProducer` (see `hwt3100_heading_reader.h`) instead of a `SentenceParser`
 - Update the N2K sender for your target PGNs
 - Adjust pin assignments and bit rate in `main.cpp`
 

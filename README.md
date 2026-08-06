@@ -26,36 +26,56 @@ This firmware serves as both a ready-to-use application and a reference example 
 
 ## Wiring
 
+### CV7 (Required)
+
+The CV7's 4-wire cable connects to HALSER's **NMEA 0183 RX** 3-pin terminal block (not a raw GPIO pin — it's the isolated, level-shifted RS-485 receiver on the board):
+
+| CV7 Wire | Function | Connect To |
+|----------|----------|------------|
+| Yellow | NMEA TX + | NMEA 0183 RX terminal block, pin **A** |
+| Green | NMEA TX − | NMEA 0183 RX terminal block, pin **B** |
+| Blue | − Power | NMEA 0183 RX terminal block, pin **GND**, *and* your power supply's negative/return |
+| Red | + Power (8–33 VDC) | A suitable 8–33 VDC supply — e.g. HALSER's **Vin** connector (5–32 V, sourced from the NMEA 2000 bus), which is within the CV7's range as long as system voltage is ≥ 8 V |
+
+Then set HALSER's **RX SEL** jumper to **N** (NMEA 0183 / RS-485) so the RS-485 receiver is the one actually wired through to the ESP32-C3.
+
+!!! tip "No data coming through?"
+    Try swapping the A/B (Yellow/Green) connections — RS-485 polarity varies by convention between manufacturers, and reversing it is safe.
+
+The CV7 is transmit-only (8N1, 4800 bit/s) — it has no NMEA 0183 command channel, so there's nothing to wire for a return/command path. Internally, this signal reaches the ESP32-C3 on UART1 (GPIO 3 RX; GPIO 2 TX is unused).
+
+### HWT3100 Fluxgate Compass (Optional)
+
+An optional WitMotion HWT3100-TTL/232 fluxgate compass can be connected for magnetic heading. It does **not** go on HALSER's dedicated NMEA 0183/RS-232/UART terminal block — that block's receive side is a single hardware-muxed channel selected by the **RX SEL** jumper, and the CV7 already occupies it (set to **N**, above). Instead, wire the HWT3100 directly to the 4 pins on HALSER's **GPIO** header labeled `20`, `21`, `GND`, and to the **Vin** connector for power:
+
+| HWT3100 Wire | Connect To |
+|--------------|------------|
+| VCC (red) | **Vin** connector (5–36 V, matches the HWT3100's input range) |
+| TX (yellow) | GPIO header, pin **21** (UART0 RX) |
+| RX (green) | GPIO header, pin **20** (UART0 TX) |
+| GND (black) | GPIO header, pin **GND** |
+
+!!! note
+    GPIO 20/21 are direct, non-isolated 3.3 V ESP32-C3 logic — unlike the board's dedicated serial connectors, this path has no galvanic isolation or level shifting. Confirm the HWT3100's TTL logic levels are 3.3 V-tolerant before wiring, and keep this cable run short.
+
+The HWT3100 does not speak NMEA 0183; it uses a proprietary AT-command/Modbus RTU protocol at 9600 bit/s (default). This firmware switches it into Modbus mode on boot and polls it as a Modbus RTU master — see [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for details. Heading is transmitted as NMEA 2000 PGN 127250 (Vessel Heading, magnetic reference) and Signal K `navigation.headingMagnetic`.
+
+### Internal Pin Reference
+
+The terminal blocks and headers above are already routed to these ESP32-C3 pins on the board; you don't wire to them directly except where noted (GPIO 20/21/GND on the GPIO header):
+
 | HALSER Pin | Function |
 |------------|----------|
 | GPIO 2 | UART1 TX (unused — CV7 has no NMEA 0183 command channel) |
-| GPIO 3 | UART1 RX ← CV7 TX |
+| GPIO 3 | UART1 RX ← CV7 TX (via the NMEA 0183 RX terminal block, RX SEL = N) |
 | GPIO 4 | CAN TX → NMEA 2000 |
 | GPIO 5 | CAN RX ← NMEA 2000 |
 | GPIO 6 | I2C SDA (OLED display) |
 | GPIO 7 | I2C SCL (OLED display) |
 | GPIO 8 | RGB LED (SK6805) |
 | GPIO 9 | Button |
-| GPIO 20 | UART0 TX → HWT3100 RX (optional fluxgate compass) |
-| GPIO 21 | UART0 RX ← HWT3100 TX (optional fluxgate compass) |
-
-The CV7 communicates via NMEA 0183 at 4800 bit/s (8N1), transmit-only — it accepts no configuration commands over the serial link.
-
-### HWT3100 Fluxgate Compass (Optional)
-
-An optional WitMotion HWT3100-TTL/232 fluxgate compass can be connected for magnetic heading. It does **not** go on HALSER's dedicated NMEA 0183/RS-232/UART terminal block — that block's receive side is a single hardware-muxed channel selected by the **RX SEL** jumper, and the CV7 already occupies it (jumper on **N**, RS-485). Instead, the HWT3100 is wired directly to the ESP32-C3 GPIO header:
-
-| HWT3100 Wire | HALSER Connection |
-|--------------|--------------------|
-| VCC (red) | **Vin** connector (5–36 V, matches the HWT3100's input range) |
-| TX (yellow) | GPIO 21 (UART0 RX) |
-| RX (green) | GPIO 20 (UART0 TX) |
-| GND (black) | GND |
-
-!!! note
-    GPIO 20/21 are direct, non-isolated 3.3 V ESP32-C3 logic — unlike the board's dedicated serial connectors, this path has no galvanic isolation or level shifting. Confirm the HWT3100's TTL logic levels are 3.3 V-tolerant before wiring.
-
-The HWT3100 does not speak NMEA 0183; it uses a proprietary AT-command/Modbus RTU protocol at 9600 bit/s (default). This firmware switches it into Modbus mode on boot and polls it as a Modbus RTU master — see [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for details. Heading is transmitted as NMEA 2000 PGN 127250 (Vessel Heading, magnetic reference) and Signal K `navigation.headingMagnetic`.
+| GPIO 20 | UART0 TX → HWT3100 RX (optional fluxgate compass, direct GPIO header) |
+| GPIO 21 | UART0 RX ← HWT3100 TX (optional fluxgate compass, direct GPIO header) |
 
 ## Usage
 

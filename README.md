@@ -52,6 +52,22 @@ Navigate to the **Reference Angle** section in the web UI. Enter the angle reado
 
 Unlike some wind instruments, the CV7 exposes no NMEA 0183 command to apply this offset in the instrument itself, so it is applied entirely in software (via a `LambdaTransform` in `main.cpp`) to the parsed wind angle, and persisted only to the ESP32 filesystem.
 
+### OTA Firmware Updates
+
+The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
+
+Every tagged release (`v*`) is built by [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) and published as a downloadable `.bin` on the repository's [Releases](../../releases) page. To flash a downloaded release onto a device that's already running this firmware:
+
+```bash
+# Using PlatformIO (uses the OTA password set in main.cpp's enable_ota() call)
+pio run -t upload --upload-port <device-ip> --upload-flags="--auth=thisisfine"
+
+# Or using espota.py directly
+python espota.py -i <device-ip> -a thisisfine -f HALSER-cv7-wind-interface-<version>.bin
+```
+
+Note that the published binary is the application image only (no bootloader/partition table), so it's only valid for OTA onto a device already running compatible firmware — first-time programming still requires a wired `pio run -t upload`. Non-tagged builds (e.g. `workflow_dispatch` runs) are uploaded as workflow artifacts instead of releases.
+
 ### Signal K Integration
 
 Wind data is emitted to Signal K as:

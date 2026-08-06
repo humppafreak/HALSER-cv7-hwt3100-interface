@@ -1,0 +1,104 @@
+name: Release firmware
+
+# Builds the HALSER CV7 wind interface firmware and publishes the
+# application binary as a downloadable GitHub Release asset. The published
+# .bin is meant for OTA upload (e.g. via `espota.py` / PlatformIO's
+# --upload-port over WiFi) against a device already running this firmware
+# with OTA enabled — it is not a full-flash image (no bootloader/partition
+# table), so first-time programming still requires a wired `pio run -t
+# upload`.
+#
+# Two ways to cut a release:
+# - Push a `v*` tag yourself; the workflow builds and attaches the binary.
+# - Run this workflow manually with a `version` input (e.g. "v1.0.0"); it
+#   creates and pushes that tag itself (using the workflow's own token, so
+#   it works even where direct tag pushes aren't permitted), then builds
+#   and publishes the release the same way.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to create and release (e.g. v1.0.0). Leave empty for an unpublished build."
+        required: false
+        default: ""
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ inputs.version }}" -m "${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+          key: platformio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            platformio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run -e halser
+
+      - name: Package binary
+        id: package
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          version="${DISPATCH_VERSION:-${GITHUB_REF_NAME}}"
+          if [ -z "$version" ]; then
+            version="manual-$(date +%Y%m%d%H%M%S)"
+          fi
+          out="HALSER-cv7-wind-interface-${version}.bin"
+          cp .pio/build/halser/firmware.bin "$out"
+          echo "asset_path=$out" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Should publish a release
+        id: should_release
+        run: |
+          if [[ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" || -n "${DISPATCH_VERSION}" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+
+      - name: Publish release
+        if: steps.should_release.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.version }}
+          files: ${{ steps.package.outputs.asset_path }}
+          generate_release_notes: true
+
+      - name: Upload build artifact
+        if: steps.should_release.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset_path }}
+          path: ${{ steps.package.outputs.asset_path }}

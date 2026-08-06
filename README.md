@@ -56,17 +56,19 @@ Unlike some wind instruments, the CV7 exposes no NMEA 0183 command to apply this
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
 
-Every tagged release (`v*`) is built by [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) and published as a downloadable `.bin` on the repository's [Releases](../../releases) page. To flash a downloaded release onto a device that's already running this firmware:
+The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-wind-interface-v1.0.0.bin`](firmware/HALSER-cv7-wind-interface-v1.0.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
+
+To flash a downloaded binary onto a device that's already running this firmware:
 
 ```bash
 # Using PlatformIO (uses the OTA password set in main.cpp's enable_ota() call)
 pio run -t upload --upload-port <device-ip> --upload-flags="--auth=thisisfine"
 
 # Or using espota.py directly
-python espota.py -i <device-ip> -a thisisfine -f HALSER-cv7-wind-interface-<version>.bin
+python espota.py -i <device-ip> -a thisisfine -f firmware/HALSER-cv7-wind-interface-<version>.bin
 ```
 
-Note that the published binary is the application image only (no bootloader/partition table), so it's only valid for OTA onto a device already running compatible firmware — first-time programming still requires a wired `pio run -t upload`. Non-tagged builds (e.g. `workflow_dispatch` runs) are uploaded as workflow artifacts instead of releases.
+Note that the binary is the application image only (no bootloader/partition table), so it's only valid for OTA onto a device already running compatible firmware — first-time programming still requires a wired `pio run -t upload`.
 
 ### Signal K Integration
 

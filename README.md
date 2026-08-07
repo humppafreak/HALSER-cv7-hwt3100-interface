@@ -13,6 +13,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 - Outputs wind data to Signal K via WiFi/WebSocket
 - Configurable reference angle offset via web UI (wind vane alignment, applied entirely in software)
 - Optional HWT3100 fluxgate compass support: polls magnetic heading over Modbus RTU, transmits NMEA 2000 PGN 127250 (Vessel Heading) and Signal K `navigation.headingMagnetic`
+- HWT3100 magnetic field calibration from the web UI — manual Start/Stop, an Auto mode that detects two full rotations and ends itself, and a separate Clear Magnetic Bias action
 - UDP NMEA 0183 broadcast output (port 10110) — synthesized `$IIMWV`/`$HCHDM` sentences for chartplotter apps (e.g. OpenCPN) that consume NMEA 0183 directly over WiFi, no Signal K server required
 - Independent, live web UI toggles for both inputs (CV7 wind, HWT3100 heading) and all three outputs (Signal K, NMEA 2000, UDP) — no restart needed to apply
 - OLED display showing hostname, IP, uptime, wind speed, wind angle, and (if the HWT3100 is connected) magnetic heading
@@ -110,6 +111,19 @@ The web UI has independent checkboxes for both inputs and all three outputs:
 
 An input toggle and an output toggle are independent: disabling the wind input silences wind data on *every* output at once, while disabling just the NMEA 2000 output leaves Signal K and UDP unaffected (as long as the wind/heading input itself is still enabled). All five take effect immediately — unlike the NMEA 2000 Watchdog setting below, none of them require a device restart.
 
+### HWT3100 Compass Calibration
+
+If a HWT3100 is connected, the web UI's Control tab has four buttons under "Calibrate Compass" that drive the sensor's own magnetic field calibration (its `CAL` register, `0xD9`):
+
+| Button | Effect |
+|--------|--------|
+| Start | Enters calibration mode. Physically rotate the sensor (or the vessel, if mounted) through 2-3 full slow turns — clockwise or counterclockwise, either direction is fine — then press Stop. |
+| Stop | Exits calibration mode, ending whichever calibration is in progress (manual or Auto). |
+| Auto (2 turns) | Enters calibration mode and watches the heading readings itself, accumulating total rotation regardless of direction, and automatically exits once two full turns (720°) have been covered — no need to press Stop. Times out and exits on its own after 2 minutes if the sensor is never actually rotated, so it can't get stuck. |
+| Clear Magnetic Bias | Wipes the sensor's existing calibration offset — an independent action, not part of the start/rotate/stop sequence; use it before redoing a bad calibration. |
+
+While a calibration (manual or Auto) is actively in progress, heading readings are withheld from N2K/Signal K/UDP/the OLED's HDG line — the sensor's output is unreliable mid-calibration, so nothing downstream sees a transient bogus reading. Status ("Idle", "Calibrating", "Auto-calibrating", "Calibration done", "Bias cleared", "Calibration timed out", "Calibration error") is shown as a status page item and on the OLED's bottom row. See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the state machine.
+
 ### OTA Firmware Updates
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
@@ -167,6 +181,7 @@ If connected, a 128x64 SSD1306 OLED display shows:
 - Apparent wind speed (m/s)
 - Apparent wind angle (degrees, -180 to +180)
 - Magnetic heading (degrees, 0 to 360) — reads 0.0 until an HWT3100 heading is received, since it's not connected/expiry-aware like the N2K senders
+- HWT3100 calibration status (blank when no calibration is running/has run)
 
 ## Architecture
 
@@ -240,8 +255,8 @@ This is a deliberate, accepted tradeoff rather than an oversight: fixing it prop
 | File | Purpose |
 |------|---------|
 | `main.cpp` | Entry point — wires all components together, including the reference angle `LambdaTransform` and the five enable/disable toggles |
-| `ssd1306_display.h/.cpp` | OLED display driver (hostname, IP, uptime, AWS, AWA, HDG) |
-| `hwt3100_heading_reader.h` | Modbus RTU master polling the HWT3100 fluxgate compass for magnetic heading |
+| `ssd1306_display.h/.cpp` | OLED display driver (hostname, IP, uptime, AWS, AWA, HDG, calibration status) |
+| `hwt3100_heading_reader.h` | Modbus RTU master polling the HWT3100 for magnetic heading; also drives its on-sensor magnetic field calibration (manual and Auto) |
 | `enabled_gate.h` | `EnabledGate<T>` — live `CheckboxConfig`-gated pass-through, used for the input toggles and the Signal K output toggle |
 
 ### CV7 Protocol

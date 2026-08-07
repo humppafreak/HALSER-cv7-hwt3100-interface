@@ -21,6 +21,10 @@
 // Also adds a UDP NMEA 0183 broadcast output (port 10110) alongside N2K and
 // Signal K — see udp_nmea0183_sender.h.
 //
+// The web UI also exposes HWT3100 magnetic field calibration controls
+// (Start/Stop/Auto/Clear Bias buttons, plus a status page item and OLED
+// line) — see hwt3100_heading_reader.h's calibration state machine.
+//
 // Both inputs (wind, heading) and all three outputs (Signal K, N2K, UDP)
 // have independent, live-toggleable web UI checkboxes (see enabled_gate.h
 // and the "Enable/disable toggles" section below) — disabling an input
@@ -43,6 +47,7 @@
 #include "sensesp/transforms/lambda_transform.h"
 #include "sensesp/ui/config_item.h"
 #include "sensesp/ui/status_page_item.h"
+#include "sensesp/ui/ui_button.h"
 #include "sensesp/ui/ui_controls.h"
 #include "sensesp_app_builder.h"
 #include "sensesp_nmea0183/nmea0183.h"
@@ -78,6 +83,26 @@ ObservableValue<int> n2k_tx_counter = 0;
 
 elapsedMillis n2k_time_since_rx = 0;
 elapsedMillis n2k_time_since_tx = 0;
+
+String CalibrationStatusText(CalibrationStatus status) {
+  switch (status) {
+    case CalibrationStatus::kIdle:
+      return "Idle";
+    case CalibrationStatus::kCalibrating:
+      return "Calibrating";
+    case CalibrationStatus::kAutoCalibrating:
+      return "Auto-calibrating";
+    case CalibrationStatus::kDone:
+      return "Calibration done";
+    case CalibrationStatus::kBiasCleared:
+      return "Bias cleared";
+    case CalibrationStatus::kTimedOut:
+      return "Calibration timed out";
+    case CalibrationStatus::kError:
+      return "Calibration error";
+  }
+  return "Unknown";
+}
 
 void setup() {
   Serial.setTxTimeoutMs(0);
@@ -278,6 +303,34 @@ void setup() {
       }));
 
   /////////////////////////////////////////////////////////////////////
+  // HWT3100 magnetic field calibration controls. The physical procedure
+  // (per the sensor's manual) is: enter calibration, physically rotate the
+  // sensor through 2-3 full turns, then exit calibration — Start/Stop are
+  // the manual version of that; Auto does the same but watches the heading
+  // readings itself to detect two full rotations and exits automatically.
+  // See hwt3100_heading_reader.h for the calibration state machine this
+  // drives.
+
+  UIButton::add("hwt3100_cal_start", "Calibrate Compass: Start")
+      ->attach([heading_reader]() { heading_reader->RequestCalibrationStart(); });
+
+  UIButton::add("hwt3100_cal_stop", "Calibrate Compass: Stop",
+                /* must_confirm= */ false)
+      ->attach([heading_reader]() { heading_reader->RequestCalibrationStop(); });
+
+  UIButton::add("hwt3100_cal_auto", "Calibrate Compass: Auto (2 turns)")
+      ->attach(
+          [heading_reader]() { heading_reader->RequestAutoCalibration(); });
+
+  UIButton::add("hwt3100_cal_clear_bias",
+                "Calibrate Compass: Clear Magnetic Bias")
+      ->attach(
+          [heading_reader]() { heading_reader->RequestClearMagneticBias(); });
+
+  auto calibration_status_ui = std::make_shared<StatusPageItem<String>>(
+      "HWT3100 Calibration Status", "Idle", "Heading", 200);
+
+  /////////////////////////////////////////////////////////////////////
   // Signal K outputs
 
   auto wind_speed_sk = std::make_shared<SKOutputFloat>(
@@ -373,6 +426,14 @@ void setup() {
   reference_angle_transform->connect_to(
       &(display->apparent_wind_angle_consumer));
   heading_gate->connect_to(&(display->heading_consumer));
+
+  event_loop()->onRepeat(
+      500, [heading_reader, calibration_status_ui, display]() {
+        String status_text =
+            CalibrationStatusText(heading_reader->GetCalibrationStatus());
+        calibration_status_ui->set(status_text);
+        display->SetCalibrationStatus(status_text);
+      });
 
   while (true) {
     loop();

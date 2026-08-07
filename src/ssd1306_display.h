@@ -58,6 +58,13 @@ class InfoDisplay {
     this->heading_ = value * 180 / M_PI;
   }};
 
+  // Not a LambdaConsumer/producer-driven value like the others — the
+  // caller (main.cpp) polls Hwt3100HeadingReader::GetCalibrationStatus()
+  // periodically and pushes the resulting text here directly.
+  void SetCalibrationStatus(const String& status) {
+    this->calibration_status_ = status;
+  }
+
  private:
   Adafruit_SSD1306* display_;
 
@@ -66,6 +73,9 @@ class InfoDisplay {
   float apparent_wind_angle_ = 0;
   // Magnetic heading, in degrees from 0 to 360.
   float heading_ = 0;
+  // HWT3100 calibration status text (blank when there's nothing to show,
+  // e.g. no HWT3100 connected).
+  String calibration_status_;
 
   void clear_row(int row);
   void print_row(int row, String value);
@@ -82,6 +92,7 @@ class InfoDisplay {
     print_row(5, row_buf);
     snprintf(row_buf, sizeof(row_buf), "HDG: %.1f deg", heading_);
     print_row(6, row_buf);
+    print_row(7, calibration_status_);
     display_->display();
   }
 };

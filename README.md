@@ -1,6 +1,6 @@
 # HALSER Wind Interface
 
-> **⚠️ Warning: untested on real hardware.** This code has only been built (`pio run`) and never run on an actual HALSER board, CV7, or HWT3100. Protocol details (NMEA 0183 field formats, the HWT3100 Modbus framing/CRC, wiring) have been checked against vendor documentation, but nothing here has been verified against real devices. Test thoroughly before relying on it.
+> **⚠️ Warning: untested on real hardware.** This code has only been built (`pio run`) and never run on an actual HALSER board, CV7, or HWT3100. Protocol details (NMEA 0183 field formats, wiring) have been checked against vendor documentation, but nothing here has been verified against real devices. The HWT3100 heading path is especially uncertain: the AT command set is documented in the sensor's manual, but the byte format of its continuous data stream is not, so this firmware's parser is a best-effort guess (see [HWT3100 Protocol](#hwt3100-protocol) below) rather than something built from a confirmed spec. Test thoroughly before relying on it.
 
 ESP32-C3 firmware for the [HALSER](https://shop.hatlabs.fi/products/halser) board that bridges an **LCJ Capteurs CV7** ultrasonic wind instrument to NMEA 2000 and Signal K networks.
 
@@ -12,7 +12,7 @@ This firmware serves as both a ready-to-use application and a reference example 
 - Transmits wind data as NMEA 2000 PGN 130306 (Wind Data) at 100ms intervals
 - Outputs wind data to Signal K via WiFi/WebSocket
 - Configurable reference angle offset via web UI (wind vane alignment, applied entirely in software)
-- Optional HWT3100 fluxgate compass support: polls magnetic heading over Modbus RTU, transmits NMEA 2000 PGN 127250 (Vessel Heading) and Signal K `navigation.headingMagnetic`
+- Optional HWT3100 fluxgate compass support: reads magnetic heading over its TTL UART (AT commands + WitMotion's standard binary output packets), transmits NMEA 2000 PGN 127250 (Vessel Heading) and Signal K `navigation.headingMagnetic`
 - HWT3100 magnetic field calibration from the web UI — manual Start/Stop, an Auto mode that detects two full rotations and ends itself, and a separate Clear Magnetic Bias action
 - UDP NMEA 0183 broadcast output (port 10110) — synthesized `$IIMWV`/`$HCHDM` sentences for chartplotter apps (e.g. OpenCPN) that consume NMEA 0183 directly over WiFi, no Signal K server required
 - Independent, live web UI toggles for both inputs (CV7 wind, HWT3100 heading) and all three outputs (Signal K, NMEA 2000, UDP) — no restart needed to apply
@@ -63,7 +63,7 @@ An optional WitMotion HWT3100-TTL/232 fluxgate compass can be connected for magn
 !!! note
     GPIO 20/21 are direct, non-isolated 3.3 V ESP32-C3 logic — unlike the board's dedicated serial connectors, this path has no galvanic isolation or level shifting. Confirm the HWT3100's TTL logic levels are 3.3 V-tolerant before wiring, and keep this cable run short.
 
-The HWT3100 does not speak NMEA 0183; it uses a proprietary AT-command/Modbus RTU protocol at 9600 bit/s (default). This firmware switches it into Modbus mode on boot and polls it as a Modbus RTU master — see [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for details. Heading is transmitted as NMEA 2000 PGN 127250 (Vessel Heading, magnetic reference) and Signal K `navigation.headingMagnetic`.
+The HWT3100 does not speak NMEA 0183; it uses a proprietary AT-command protocol at 9600 bit/s (default). This particular (TTL) variant of the sensor does not support Modbus mode, despite the manual describing one — this firmware talks to it exclusively via AT commands, using the sensor's continuous streaming output for heading data, see [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for details. Heading is transmitted as NMEA 2000 PGN 127250 (Vessel Heading, magnetic reference) and Signal K `navigation.headingMagnetic`.
 
 ### Internal Pin Reference
 
@@ -113,7 +113,7 @@ An input toggle and an output toggle are independent: disabling the wind input s
 
 ### HWT3100 Compass Calibration
 
-If a HWT3100 is connected, the web UI's Control tab has four buttons under "Calibrate Compass" that drive the sensor's own magnetic field calibration (its `CAL` register, `0xD9`):
+If a HWT3100 is connected, the web UI's Control tab has four buttons under "Calibrate Compass" that drive the sensor's own magnetic field calibration via its `AT+CALI` command:
 
 | Button | Effect |
 |--------|--------|
@@ -126,23 +126,23 @@ While a calibration (manual or Auto) is actively in progress, heading readings a
 
 ### HWT3100 Settings
 
-If a HWT3100 is connected, three of its Modbus settings registers are exposed as web UI configuration items, all applied live (no restart) by writing the corresponding register on change:
+If a HWT3100 is connected, three settings are exposed as web UI configuration items, all applied live (no restart) by sending the corresponding AT command on change:
 
-| Setting | Register | Effect |
-|---------|----------|--------|
-| HWT3100 Baud Rate | `BAUD` (`0xD2`) | UART baud rate: 9600 (default), 115200, or 921600. Writes the sensor's register, then immediately reconfigures this device's own UART to match, since the sensor is assumed to switch immediately too. **If communication is lost after a change**, power-cycle the HWT3100 (resets it to 9600) and set this back to 9600. |
-| HWT3100 Smoothing Filter | `FILT` (`0xD8`) | 0 = off (default); 1–999, smoother as the value decreases, per the manual. |
-| HWT3100 Active Push Interval (ms) | `MRATE` (`0xDA`) | 0 = standard request/response (default, and the only mode this firmware actually supports); 1–10000 = the sensor pushes unsolicited frames every N ms. **Leave this at 0** — this firmware always polls with its own request/response cycle and never reads the sensor's autonomous push frames, so a nonzero value can interleave unsolicited frames with this firmware's own reads and disrupt heading data. |
+| Setting | AT Command | Effect |
+|---------|------------|--------|
+| HWT3100 Baud Rate | `AT+UART=` | UART baud rate: 9600 (default, code 0), 115200 (code 1), or 460800 (code 2). Sends the command, then immediately reconfigures this device's own UART to match, since the sensor is assumed to switch immediately too. **If communication is lost after a change**, power-cycle the HWT3100 (resets it to 9600) and set this back to 9600. |
+| HWT3100 Smoothing Filter | `AT+FILT=` | 0 = off (default); 1–999, smoother as the value decreases, per the manual. |
+| HWT3100 Active Push Interval (ms) | `AT+PRATE=` | Default 200. This is the sensor's own continuous-streaming interval — since the AT command interface has no separate on-demand query command, this *is* the firmware's heading update rate, not an optional extra like it was under Modbus polling. 0 ("single return") pauses continuous updates entirely; avoid it unless that's actually intended. Valid range otherwise is 10–10000. |
 
-A read-only **HWT3100 Hardware Version** status page item shows the sensor's `VERSION` register (`0xD0`) once read at boot — an opaque code with no meaning documented beyond "a version number" in the manual, shown as-is.
+There is no AT command to query the sensor's hardware/firmware version, so no version display is offered (an earlier revision of this firmware showed one via the Modbus-only `VERSION` register, but that doesn't exist on this TTL variant).
 
-See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the register writes and the baud-rate switchover logic.
+See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the AT commands and the baud-rate switchover logic.
 
 ### OTA Firmware Updates
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
 
-The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.2.2.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.2.2.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
+The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.3.0.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.3.0.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
 
 To flash a downloaded binary onto a device that's already running this firmware:
 
@@ -219,11 +219,11 @@ NMEA0183IOTask
 
 Web UI (SensESP) ──── Reference angle transform, all five toggles ──── Filesystem (persistent storage)
 
-HWT3100 (Modbus RTU, 9600 bit/s, optional)
+HWT3100 (AT commands + TTL UART, 9600 bit/s, optional)
   │
   │ UART0 (GPIO 20/21, non-isolated GPIO header)
   ▼
-Hwt3100HeadingReader (dedicated FreeRTOS task, polls MAGX..YAW register block)
+Hwt3100HeadingReader (dedicated FreeRTOS task, parses streamed binary packets)
   └── EnabledGate (Enable Heading Input toggle) ── gates every consumer below
         ├── N2kHeadingSender ── EnabledGate (Enable N2K)         → NMEA 2000 bus (TWAI, GPIO 4/5), PGN 127250
         ├── EnabledGate (Enable Signal K) → SKOutputFloat        → Signal K server (navigation.headingMagnetic)
@@ -270,7 +270,7 @@ This is a deliberate, accepted tradeoff rather than an oversight: fixing it prop
 |------|---------|
 | `main.cpp` | Entry point — wires all components together, including the reference angle `LambdaTransform` and the five enable/disable toggles |
 | `ssd1306_display.h/.cpp` | OLED display driver (hostname, IP, uptime, AWS, AWA, HDG, calibration status) |
-| `hwt3100_heading_reader.h` | Modbus RTU master polling the HWT3100 for magnetic heading; also drives its on-sensor magnetic field calibration (manual and Auto) and settings (baud rate, filter, push interval, version) |
+| `hwt3100_heading_reader.h` | AT-command/TTL reader parsing the HWT3100's streamed binary packets for magnetic heading; also drives its on-sensor magnetic field calibration (manual and Auto) and settings (baud rate, filter, push interval) |
 | `enabled_gate.h` | `EnabledGate<T>` — live `CheckboxConfig`-gated pass-through, used for the input toggles and the Signal K output toggle |
 
 ### CV7 Protocol
@@ -288,19 +288,15 @@ The CV7 also emits undocumented `$PLCJ,...` / `$PLCJEA...` sentences described o
 
 ### HWT3100 Protocol
 
-The HWT3100-TTL/232 does not speak NMEA 0183. Per its manual, it has two serial modes, switched with an `AT+MODE=` command:
+The HWT3100-TTL/232 does not speak NMEA 0183. Its manual describes both an ASCII/AT-command mode and a Modbus RTU mode, but real hardware testing found that **this TTL variant does not actually support Modbus mode**, contradicting the manual — so this firmware talks to it exclusively via plain-text AT commands (`AT+PRATE`, `AT+CALI`, `AT+FILT`, `AT+UART`, etc., each sent as `"AT+NAME=value\r\n"` and acknowledged with a short ASCII reply such as `"OK"` or `"ERROR"`).
 
-- **ASCII mode** (factory default) — AT commands (`AT+PRATE`, `AT+CALI`, etc.); the continuous streaming line format isn't documented byte-for-byte, so this firmware doesn't use it.
-- **Modbus RTU mode** — standard Modbus read/write frames (function `0x03` read, `0x06` write), fully documented with a worked byte example and CRC16 in the manual.
+For heading itself, this firmware sets `AT+PRATE=<ms>` (default 200) at boot to enable the sensor's continuous streaming output, since there's no documented on-demand query command in AT mode. **What the manual does not document is the byte format of that streamed output.** Rather than guess at an arbitrary format, this firmware assumes the stream uses WitMotion's own published standard binary packet protocol (used across WitMotion's wider sensor catalog and by all of their official SDKs):
 
-This firmware sends `AT+MODE=1` once on boot to force Modbus mode — the manual documents that command as being accepted regardless of the sensor's current mode, so it's safe to send unconditionally — then polls as a Modbus RTU master, reading the 4-register block starting at `0xDB` (MAGX, MAGY, MAGZ, YAW) every 200ms and using only the YAW (heading) register:
+```
+0x55, TYPE, D1L, D1H, D2L, D2H, D3L, D3H, D4L, D4H, SUM   (11 bytes)
+```
 
-| Register | Address | Description |
-|----------|---------|-------------|
-| MAGX / MAGY / MAGZ | 0xDB–0xDD | Magnetic field, X/Y/Z axes (not used by this firmware) |
-| YAW | 0xDE | Heading, signed int16, 0.1° units |
-
-See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the full request/response framing and CRC.
+little-endian 16-bit data words, `SUM` = low byte of the sum of the preceding 10 bytes. Only the Angle packet (`TYPE` = `0x53`) is used, for its third data word (Yaw): `heading_degrees = int16(YawL, YawH) / 32768 * 180`. This is a **best-effort, unverified guess** — the HWT3100 unit available during development was defective, so none of this (the AT command set as applied here, the assumed packet format, or the calibration/settings behavior) has been confirmed against real hardware. See the file header comment in [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the full reasoning and what to check first if it doesn't work.
 
 ### NMEA 2000 Device Identity
 
@@ -340,7 +336,7 @@ This firmware demonstrates several patterns useful for building custom SensESP m
 2. **Software-only calibration** — A `LambdaTransform` with persisted config for devices with no command channel
 3. **NMEA 2000 output with value expiry** — `RepeatExpiring` prevents stale data transmission while maintaining constant PGN rate
 4. **Producer/Consumer pipeline** — Connecting a single data source (wind parser) to multiple sinks (N2K, Signal K, OLED)
-5. **Non-NMEA-0183 devices** — `Hwt3100HeadingReader` shows the pattern for a device that speaks a different serial protocol entirely (Modbus RTU): a custom `ValueProducer` running its own FreeRTOS task, polling on its own schedule, that plugs into the same N2K/Signal K sender pattern as the NMEA 0183-based wind path
+5. **Non-NMEA-0183 devices** — `Hwt3100HeadingReader` shows the pattern for a device that speaks a different serial protocol entirely (AT commands + a streamed binary packet format): a custom `ValueProducer` running its own FreeRTOS task, parsing a continuous byte stream on its own schedule, that plugs into the same N2K/Signal K sender pattern as the NMEA 0183-based wind path
 
 To adapt this for a different device:
 - Modify or replace `WIMWVSentenceParser` if your device uses different NMEA 0183 sentences

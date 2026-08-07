@@ -11,12 +11,14 @@
 // to the ESP32 filesystem only.
 //
 // Also wires an optional WitMotion HWT3100-TTL/232 fluxgate compass, read
-// over Modbus RTU on a second, non-isolated UART (GPIO 20/21, the HALSER
-// GPIO header) → N2K heading sender (PGN 127250) + Signal K + OLED. The
-// HWT3100 isn't wired to the board's dedicated RS-485/RS-232/UART terminal
-// block because that block's receive side is a single hardware-muxed
-// channel (the RX SEL jumper) already claimed by the CV7's RS-485
-// connection; see hwt3100_heading_reader.h for the sensor's protocol.
+// over its TTL UART (AT commands + WitMotion's standard binary output
+// packets — see hwt3100_heading_reader.h; this TTL-variant unit does not
+// support Modbus, unlike what its manual describes) on a second,
+// non-isolated UART (GPIO 20/21, the HALSER GPIO header) → N2K heading
+// sender (PGN 127250) + Signal K + OLED. The HWT3100 isn't wired to the
+// board's dedicated RS-485/RS-232/UART terminal block because that
+// block's receive side is a single hardware-muxed channel (the RX SEL
+// jumper) already claimed by the CV7's RS-485 connection.
 //
 // Also adds a UDP NMEA 0183 broadcast output (port 10110) alongside N2K and
 // Signal K — see udp_nmea0183_sender.h.
@@ -24,8 +26,7 @@
 // The web UI also exposes HWT3100 magnetic field calibration controls
 // (Start/Stop/Auto/Clear Bias buttons, plus a status page item and OLED
 // line) — see hwt3100_heading_reader.h's calibration state machine — and
-// HWT3100 settings (baud rate, smoothing filter, active push interval),
-// plus a read-only hardware version display.
+// HWT3100 settings (baud rate, smoothing filter, active push interval).
 //
 // Both inputs (wind, heading) and all three outputs (Signal K, N2K, UDP)
 // have independent, live-toggleable web UI checkboxes (see enabled_gate.h
@@ -250,8 +251,8 @@ void setup() {
       "20240601",  // Manufacturer's Model serial code (max 32 chars)
       105,         // Manufacturer's product code
       "Wind-Hdg-N2K",  // Manufacturer's Model ID (max 33 chars)
-      "1.2.2",     // Manufacturer's Software version code (max 40 chars)
-      "1.2.2"      // Manufacturer's Model version (max 24 chars)
+      "1.3.0",     // Manufacturer's Software version code (max 40 chars)
+      "1.3.0"      // Manufacturer's Model version (max 24 chars)
   );
 
   nmea2000->SetDeviceInformation(
@@ -290,11 +291,12 @@ void setup() {
           }));
 
   /////////////////////////////////////////////////////////////////////
-  // HWT3100 settings: baud rate, smoothing filter, active push interval,
-  // and a read-only hardware version display. Filter/push interval are
-  // plain pass-through Modbus register writes; baud rate is applied live
-  // too, but also requires reconfiguring this device's own UART to match
-  // — see hwt3100_heading_reader.h.
+  // HWT3100 settings: baud rate, smoothing filter, and the sensor's own
+  // AT+PRATE continuous-streaming interval (also this firmware's
+  // effective heading update rate, since the AT command interface has no
+  // separate request/response polling mode). All three are plain AT
+  // commands, applied live; baud rate additionally requires reconfiguring
+  // this device's own UART to match — see hwt3100_heading_reader.h.
 
   float hwt3100_baud_default = kHeadingBitRate;
   String hwt3100_baud_path = "/HWT3100/Baud Rate";
@@ -304,11 +306,10 @@ void setup() {
       ->set_title("HWT3100 Baud Rate")
       ->set_description(
           "UART baud rate for the HWT3100 (supported values: 9600, "
-          "115200, 921600). Applied live on change: writes the sensor's "
-          "BAUD register, then immediately reconfigures this device's "
-          "UART to match. If communication is lost after a change, "
-          "power-cycle the HWT3100 (resets it to 9600) and set this back "
-          "to 9600.")
+          "115200, 460800). Applied live on change: sends AT+UART to the "
+          "sensor, then immediately reconfigures this device's UART to "
+          "match. If communication is lost after a change, power-cycle "
+          "the HWT3100 (resets it to 9600) and set this back to 9600.")
       ->set_sort_order(400);
 
   float hwt3100_filter_default = 0.0f;
@@ -320,45 +321,50 @@ void setup() {
       ->set_description(
           "Sensor-side smoothing filter (0 = off/default; 1-999, "
           "smoother as the value decreases, per the manual). Applied "
-          "live on change.")
+          "live on change (AT+FILT).")
       ->set_sort_order(410);
 
-  float hwt3100_push_interval_default = 0.0f;
+  float hwt3100_push_interval_default = 200.0f;
   String hwt3100_push_interval_path = "/HWT3100/Active Push Interval";
   auto hwt3100_push_interval_config = std::make_shared<NumberConfig>(
       hwt3100_push_interval_default, hwt3100_push_interval_path);
   ConfigItem(hwt3100_push_interval_config)
       ->set_title("HWT3100 Active Push Interval (ms)")
       ->set_description(
-          "Sensor's own unsolicited-push interval (0 = standard "
-          "request/response, the default this firmware expects; "
-          "1-10000 = push every N ms). This firmware always polls with "
-          "its own request/response cycle and does not read the "
-          "sensor's autonomous push frames — leaving this at 0 is "
-          "strongly recommended, since a nonzero value can interleave "
-          "unsolicited frames with this firmware's own reads and "
-          "disrupt heading data. Applied live on change.")
+          "How often the sensor streams a heading reading (AT+PRATE), "
+          "and therefore this firmware's effective heading update rate "
+          "-- there is no other way to get data out of the sensor over "
+          "the AT command interface. 10-10000 = push every N ms "
+          "(default 200); 0 = \"single return\" mode, which pauses "
+          "continuous updates entirely until this is changed again or "
+          "the device is rebooted -- avoid 0 unless that's actually "
+          "intended. Applied live on change.")
       ->set_sort_order(420);
-
-  auto hwt3100_version_status = std::make_shared<StatusPageItem<int>>(
-      "HWT3100 Hardware Version", 0, "Heading", 430);
 
   /////////////////////////////////////////////////////////////////////
   // NMEA 2000 heading sender (HWT3100 fluxgate compass, optional)
 
-  // Validate the persisted baud rate before using it — falls back to the
-  // sensor's factory default if the stored value isn't one of the three
-  // the HWT3100 actually supports (e.g. on first boot, before any value
-  // has been saved).
+  // Validate the persisted settings before using them — fall back to
+  // known-good defaults if a stored value isn't one of the baud rates
+  // the HWT3100 actually supports, or is an out-of-range push interval
+  // (e.g. on first boot, before any value has been saved).
   int hwt3100_baud_rate = static_cast<int>(hwt3100_baud_config->get_value());
   if (hwt3100_baud_rate != 9600 && hwt3100_baud_rate != 115200 &&
-      hwt3100_baud_rate != 921600) {
+      hwt3100_baud_rate != 460800) {
     hwt3100_baud_rate = kHeadingBitRate;
   }
   Serial0.begin(hwt3100_baud_rate, SERIAL_8N1, kHeadingRxPin, kHeadingTxPin);
 
+  int hwt3100_push_interval = static_cast<int>(
+      hwt3100_push_interval_config->get_value());
+  if (hwt3100_push_interval != 0 &&
+      (hwt3100_push_interval < 10 || hwt3100_push_interval > 10000)) {
+    hwt3100_push_interval = static_cast<int>(hwt3100_push_interval_default);
+  }
+
   auto heading_reader = std::make_shared<Hwt3100HeadingReader>(
-      &Serial0, kHeadingRxPin, kHeadingTxPin);
+      &Serial0, kHeadingRxPin, kHeadingTxPin,
+      static_cast<unsigned int>(hwt3100_push_interval));
 
   // Input gate — see the wind speed/angle gates above for why every
   // consumer below reads from this rather than heading_reader directly.
@@ -511,15 +517,13 @@ void setup() {
   // file.
   int hwt3100_last_seen_baud = hwt3100_baud_rate;
   int hwt3100_last_seen_filter = static_cast<int>(hwt3100_filter_default);
-  int hwt3100_last_seen_push_interval =
-      static_cast<int>(hwt3100_push_interval_default);
+  int hwt3100_last_seen_push_interval = hwt3100_push_interval;
 
   event_loop()->onRepeat(
       500, [heading_reader, calibration_status_ui, display,
             hwt3100_baud_config, hwt3100_filter_config,
-            hwt3100_push_interval_config, hwt3100_version_status,
-            &hwt3100_last_seen_baud, &hwt3100_last_seen_filter,
-            &hwt3100_last_seen_push_interval]() {
+            hwt3100_push_interval_config, &hwt3100_last_seen_baud,
+            &hwt3100_last_seen_filter, &hwt3100_last_seen_push_interval]() {
         String status_text =
             CalibrationStatusText(heading_reader->GetCalibrationStatus());
         calibration_status_ui->set(status_text);
@@ -547,9 +551,6 @@ void setup() {
               static_cast<uint16_t>(current_push_interval));
           hwt3100_last_seen_push_interval = current_push_interval;
         }
-
-        hwt3100_version_status->set(
-            static_cast<int>(heading_reader->GetHardwareVersion()));
       });
 
   while (true) {

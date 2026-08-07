@@ -33,8 +33,8 @@ CV7 (NMEA 0183, 4800 bit/s, GPIO 3 RX / GPIO 2 TX unused)
           → UdpNmea0183Sender ($IIMWV, checks Enable UDP live) → UDP broadcast :10110
           → SSD1306 OLED display (hostname, IP, uptime, AWS, AWA)
 
-HWT3100 (Modbus RTU, 9600 bit/s, GPIO 21 RX / GPIO 20 TX, optional)
-  → Hwt3100HeadingReader (dedicated FreeRTOS task, polls MAGX..YAW block)
+HWT3100 (AT commands + TTL UART, 9600 bit/s, GPIO 21 RX / GPIO 20 TX, optional)
+  → Hwt3100HeadingReader (dedicated FreeRTOS task, parses streamed binary packets)
     → EnabledGate (Enable Heading Input, live-checked)
       → N2kHeadingSender (PGN 127250, 100ms; checks Enable N2K live)
         → tNMEA2000_esp32 (TWAI, GPIO 4 TX / GPIO 5 RX)
@@ -58,7 +58,7 @@ All five toggles (2 inputs, 3 outputs) apply live — `EnabledGate` and the N2K/
 **Application** (`src/`):
 - `main.cpp` — Entry point; initializes all components and wires the data pipeline, including the reference angle `LambdaTransform` and the 5 enable/disable toggles
 - `ssd1306_display.h/.cpp` — OLED display driver (hostname, IP, uptime, AWS, AWA, HDG; updates every 1 second)
-- `hwt3100_heading_reader.h` — Modbus RTU master (dedicated FreeRTOS task) that polls the HWT3100 fluxgate compass for magnetic heading; also drives its on-sensor magnetic field calibration (register `0xD9`, CAL) via `RequestCalibrationStart/Stop/AutoCalibration/ClearMagneticBias()`, and settings (`BAUD`/`FILT`/`MRATE`) via `RequestSetBaudRate/Filter/PushInterval()` plus a read-once `GetHardwareVersion()` — cross-task hand-off for both via `std::atomic`
+- `hwt3100_heading_reader.h` — AT-command/TTL reader (dedicated FreeRTOS task) that parses the HWT3100 fluxgate compass's streamed binary packets (WitMotion standard protocol, best-effort/unverified — see file header) for magnetic heading; also drives its on-sensor magnetic field calibration (`AT+CALI`) via `RequestCalibrationStart/Stop/AutoCalibration/ClearMagneticBias()`, and settings (`AT+UART`/`AT+FILT`/`AT+PRATE`) via `RequestSetBaudRate/Filter/PushInterval()` — cross-task hand-off for both via `std::atomic`
 - `enabled_gate.h` — `EnabledGate<T>`, a pass-through `ValueConsumer`/`ValueProducer` that only forwards a value while its `CheckboxConfig` is checked (read live, not cached); used for the two input toggles and the Signal K output toggle, since `SKOutputFloat` is a third-party type with no internal enabled flag to add
 
 ### Hardware Pin Assignments
@@ -97,15 +97,15 @@ $WIXDR,C,022.0,C,,*52
 
 ### HWT3100 Protocol
 
-Not NMEA 0183. Modbus RTU at 9600 bit/s (default), device ID `0x00`. This firmware sends `AT+MODE=1` once on boot (accepted regardless of the sensor's current mode, per its manual) to force Modbus mode, then polls as a Modbus RTU master every 200ms, reading the 4-register block at `0xDB` (MAGX, MAGY, MAGZ, YAW — the sensor only exposes this as a contiguous block, not individually addressable registers) and using only YAW (heading, signed int16, 0.1° units, register `0xDE`). Request/response framing (including a byte-for-byte manual example used to confirm the CRC16 variant and byte order) is in `src/hwt3100_heading_reader.h`.
+Not NMEA 0183. AT commands over TTL UART at 9600 bit/s (default). The sensor's manual describes a Modbus RTU mode as an alternative, but **real hardware testing found this TTL variant does not actually support it**, so this firmware uses AT commands exclusively — plain ASCII text, `"AT+NAME=value\r\n"`, acknowledged with a short line such as `"OK"` or `"ERROR"`.
 
-Calibration uses Modbus function `0x06` (write single register) against `CAL` (register `0xD9`): `1` enters magnetic field calibration, `0` exits it, `2` clears the existing offset. The expected response is an exact echo of the request, per the Modbus spec for that function; `Hwt3100HeadingReader::WriteRegister()` validates it byte-for-byte.
+There is no documented on-demand query command, so heading comes from the sensor's continuous streaming output, enabled via `AT+PRATE=<ms>` (default 200) at boot. The manual does not document that stream's byte format, so this firmware assumes WitMotion's own published standard binary packet protocol (shared across WitMotion's sensor catalog and used by their official SDKs): `0x55, TYPE, D1L, D1H, D2L, D2H, D3L, D3H, D4L, D4H, SUM` (11 bytes, little-endian 16-bit words, `SUM` = low byte of the sum of the preceding 10 bytes). Only the Angle packet (`TYPE` = `0x53`) is used, taking its third data word as Yaw: `heading_degrees = int16(YawL, YawH) / 32768 * 180`. **This is an explicitly best-effort, unverified guess** — the unit available during development was defective, so this format has not been confirmed against real hardware. The parser self-resyncs on a checksum mismatch by shifting the buffer one byte and re-scanning for the next `0x55` header. See the file header comment in `src/hwt3100_heading_reader.h` for the full reasoning.
 
-Settings (also function `0x06`) are exposed as web UI configuration items, applied live: `BAUD` (`0xD2`, values 0/1/2 = 9600/115200/921600 — note the manual's AT-command table lists 460800 for code 2 where the register table lists 921600; the register table is authoritative since this firmware uses the register interface), `FILT` (`0xD8`, smoothing filter), `MRATE` (`0xDA`, active push interval — this firmware always polls request/response and never consumes the sensor's own push frames, so a nonzero value here can desync the read cycle). `VERSION` (`0xD0`, read-only, function `0x03` count 1) is read once at boot, retried each poll cycle until it succeeds, and shown as-is with no documented decoding.
+Calibration uses `AT+CALI=`: `1` enters magnetic field calibration, `0` exits it, `2` clears the existing offset.
 
-Changing `BAUD` requires reconfiguring this device's own UART to match immediately after a successfully acked write, since the ack is necessarily sent at the pre-change baud and the sensor is assumed to switch right after — see `Hwt3100HeadingReader::HandlePendingSettings()`. Unverified against real hardware, like everything else in this codebase; a failed assumption here means losing contact with the sensor until it's power-cycled back to its 9600 default.
+Settings are exposed as web UI configuration items, applied live: `AT+UART=` (values 0/1/2 = 9600/115200/460800, per the manual's AT-command table), `AT+FILT=` (smoothing filter), `AT+PRATE=` (streaming interval in ms — this is now the sole heading-update mechanism, not an optional extra; 0 pauses updates entirely). There is no AT command to query hardware/firmware version, so the version display that existed under the earlier Modbus-based implementation has been removed.
 
-The sensor also has an ASCII/AT-command mode (factory default) with a continuous streaming output, but its exact line format isn't documented byte-for-byte in the manual, so this firmware doesn't use it.
+Changing `AT+UART=` requires reconfiguring this device's own UART to match immediately after a successfully acked write, since the ack is necessarily sent at the pre-change baud and the sensor is assumed to switch right after — see `Hwt3100HeadingReader::HandlePendingSettings()`. Unverified against real hardware, like everything else HWT3100-related in this codebase; a failed assumption here means losing contact with the sensor until it's power-cycled back to its 9600 default.
 
 ### NMEA 2000 PGNs
 

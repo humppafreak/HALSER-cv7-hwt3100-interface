@@ -82,6 +82,31 @@ The terminal blocks and headers above are already routed to these ESP32-C3 pins 
 | GPIO 20 | UART0 TX → HWT3100 RX (optional fluxgate compass, direct GPIO header) |
 | GPIO 21 | UART0 RX ← HWT3100 TX (optional fluxgate compass, direct GPIO header) |
 
+### HWT3100 Bench Test (Plain ESP32-WROOM-32, No HALSER Board)
+
+If you want to verify HWT3100 wiring and Modbus communication before a HALSER board and CV7 are available, `src/wroom32_hwt3100_test/main.cpp` is a standalone firmware image for a plain ESP32-WROOM-32 dev board (e.g. AZ-Delivery's ESP32 Dev Kit C) — no HALSER board, CV7, or SensESP app involved. It's built by its own PlatformIO environment (`wroom32_hwt3100_test` in `platformio.ini`), kept separate from the main `halser` firmware.
+
+Wire the HWT3100 to the dev board's UART2 pins:
+
+| HWT3100 Wire | Connect To |
+|--------------|------------|
+| VCC (red) | 5V/3V3/Vin, matching the HWT3100's input range (5–36 V) |
+| TX (yellow) | ESP32 **GPIO 16** (RX2) |
+| RX (green) | ESP32 **GPIO 17** (TX2) |
+| GND (black) | ESP32 **GND** |
+
+!!! note
+    GPIO 16/17 are UART2's default pins on the ESP32 WROOM-32 and aren't strapping pins, so they're safe to use on any standard 30/38-pin dev board without special jumpering. As with the HALSER GPIO header, this is direct 3.3 V logic with no isolation or level shifting — confirm the HWT3100 variant's signal levels (TTL vs RS-232) match before wiring; this test assumes the TTL variant. If your wiring differs, adjust `kHeadingRxPin`/`kHeadingTxPin` at the top of `main.cpp`.
+
+Build, upload, and monitor the bench test (not the HALSER application):
+
+```bash
+pio run -e wroom32_hwt3100_test -t upload
+pio device monitor -e wroom32_hwt3100_test
+```
+
+At the 115200 baud serial monitor, heading is printed once per poll cycle; single-key commands are available for version read (`v`) and calibration (`c` start, `x` stop, `b` clear bias) — see the file header in `src/wroom32_hwt3100_test/main.cpp` for details.
+
 ## Usage
 
 ### Initial Setup

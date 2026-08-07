@@ -124,6 +124,20 @@ If a HWT3100 is connected, the web UI's Control tab has four buttons under "Cali
 
 While a calibration (manual or Auto) is actively in progress, heading readings are withheld from N2K/Signal K/UDP/the OLED's HDG line — the sensor's output is unreliable mid-calibration, so nothing downstream sees a transient bogus reading. Status ("Idle", "Calibrating", "Auto-calibrating", "Calibration done", "Bias cleared", "Calibration timed out", "Calibration error") is shown as a status page item and on the OLED's bottom row. See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the state machine.
 
+### HWT3100 Settings
+
+If a HWT3100 is connected, three of its Modbus settings registers are exposed as web UI configuration items, all applied live (no restart) by writing the corresponding register on change:
+
+| Setting | Register | Effect |
+|---------|----------|--------|
+| HWT3100 Baud Rate | `BAUD` (`0xD2`) | UART baud rate: 9600 (default), 115200, or 921600. Writes the sensor's register, then immediately reconfigures this device's own UART to match, since the sensor is assumed to switch immediately too. **If communication is lost after a change**, power-cycle the HWT3100 (resets it to 9600) and set this back to 9600. |
+| HWT3100 Smoothing Filter | `FILT` (`0xD8`) | 0 = off (default); 1–999, smoother as the value decreases, per the manual. |
+| HWT3100 Active Push Interval (ms) | `MRATE` (`0xDA`) | 0 = standard request/response (default, and the only mode this firmware actually supports); 1–10000 = the sensor pushes unsolicited frames every N ms. **Leave this at 0** — this firmware always polls with its own request/response cycle and never reads the sensor's autonomous push frames, so a nonzero value can interleave unsolicited frames with this firmware's own reads and disrupt heading data. |
+
+A read-only **HWT3100 Hardware Version** status page item shows the sensor's `VERSION` register (`0xD0`) once read at boot — an opaque code with no meaning documented beyond "a version number" in the manual, shown as-is.
+
+See [`src/hwt3100_heading_reader.h`](src/hwt3100_heading_reader.h) for the register writes and the baud-rate switchover logic.
+
 ### OTA Firmware Updates
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
@@ -256,7 +270,7 @@ This is a deliberate, accepted tradeoff rather than an oversight: fixing it prop
 |------|---------|
 | `main.cpp` | Entry point — wires all components together, including the reference angle `LambdaTransform` and the five enable/disable toggles |
 | `ssd1306_display.h/.cpp` | OLED display driver (hostname, IP, uptime, AWS, AWA, HDG, calibration status) |
-| `hwt3100_heading_reader.h` | Modbus RTU master polling the HWT3100 for magnetic heading; also drives its on-sensor magnetic field calibration (manual and Auto) |
+| `hwt3100_heading_reader.h` | Modbus RTU master polling the HWT3100 for magnetic heading; also drives its on-sensor magnetic field calibration (manual and Auto) and settings (baud rate, filter, push interval, version) |
 | `enabled_gate.h` | `EnabledGate<T>` — live `CheckboxConfig`-gated pass-through, used for the input toggles and the Signal K output toggle |
 
 ### CV7 Protocol

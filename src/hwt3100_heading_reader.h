@@ -1,7 +1,7 @@
 // Polls a WitMotion HWT3100-TTL/232 fluxgate compass over Modbus RTU and
 // emits magnetic heading in radians. Also drives the sensor's on-board
-// magnetic field calibration procedure (register 0xDB CAL) on request from
-// the web UI.
+// magnetic field calibration procedure (register 0xD9, CAL) on request
+// from the web UI.
 //
 // Unlike the CV7, the HWT3100 does not speak NMEA 0183. Its serial port
 // (see product manual, "HWT3100TTL_232") offers ASCII/AT-command mode and
@@ -29,6 +29,18 @@
 // the requesting (main/UI) task to this task's Run() loop via a
 // std::atomic command flag, since the UART is exclusively owned by this
 // task; status is reported back the same way.
+//
+// Settings: baud rate (BAUD, 0xD2), smoothing filter (FILT, 0xD8), and
+// active push interval (MRATE, 0xDA) are exposed the same way — a
+// std::atomic pending-value hand-off, applied in Run()'s loop. Baud rate
+// is the only one requiring special handling: after a successful write
+// (acked at whatever baud is currently in use), this class immediately
+// reconfigures its own serial_ to match, since the sensor is assumed to
+// switch immediately too — there is no working-baud fallback if that
+// assumption is wrong or the sensor is slower to switch than expected,
+// so a change that goes wrong may require power-cycling the sensor back
+// to its 9600 default. VERSION (0xD0) is read-only and read once at
+// startup (retried each poll cycle until it succeeds).
 
 #ifndef WIND_INTERFACE_SRC_HWT3100_HEADING_READER_H_
 #define WIND_INTERFACE_SRC_HWT3100_HEADING_READER_H_
@@ -62,9 +74,16 @@ enum class CalibrationStatus : uint8_t {
 
 class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
  public:
-  explicit Hwt3100HeadingReader(HardwareSerial* serial,
-                                 unsigned int poll_interval_ms = 200)
-      : serial_{serial}, poll_interval_ms_{poll_interval_ms} {
+  // rx_pin/tx_pin are only needed for RequestSetBaudRate()'s live
+  // serial_->begin() call after a successful baud change; the caller must
+  // already have called serial->begin(...) with these same pins once
+  // before constructing this reader.
+  Hwt3100HeadingReader(HardwareSerial* serial, gpio_num_t rx_pin,
+                        gpio_num_t tx_pin, unsigned int poll_interval_ms = 200)
+      : serial_{serial},
+        rx_pin_{rx_pin},
+        tx_pin_{tx_pin},
+        poll_interval_ms_{poll_interval_ms} {
     xTaskCreate(&Hwt3100HeadingReader::TaskEntry, "hwt3100", 4096, this, 1,
                 nullptr);
   }
@@ -89,11 +108,37 @@ class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
     return calibration_status_.load();
   }
 
+  // Settings requests, same lock-free hand-off pattern as the calibration
+  // commands above. Values are applied as-is (Modbus register writes take
+  // raw uint16_t values); RequestSetBaudRate() additionally maps the given
+  // baud to the sensor's BAUD register code and, only on a successfully
+  // acked write, reconfigures this object's own serial connection to
+  // match — see the file comment above for the risk that implies.
+  void RequestSetBaudRate(uint32_t baud) {
+    pending_baud_.store(static_cast<int32_t>(baud));
+  }
+  void RequestSetFilter(uint16_t filter) {
+    pending_filter_.store(static_cast<int32_t>(filter));
+  }
+  void RequestSetPushInterval(uint16_t interval_ms) {
+    pending_push_interval_.store(static_cast<int32_t>(interval_ms));
+  }
+
+  // 0 until the initial read (retried each poll cycle until it succeeds)
+  // completes. The manual documents no meaning for this value beyond "a
+  // version code" (worked example: raw 0x34C1 = 13505), so it's exposed
+  // as-is rather than decoded.
+  uint16_t GetHardwareVersion() const { return hardware_version_.load(); }
+
  private:
   static constexpr uint8_t kDeviceId = 0x00;
   static constexpr uint16_t kRegMagXStart = 0x00DB;
   static constexpr uint16_t kRegCount = 4;  // MAGX, MAGY, MAGZ, YAW
   static constexpr uint16_t kRegCal = 0x00D9;
+  static constexpr uint16_t kRegVersion = 0x00D0;
+  static constexpr uint16_t kRegBaud = 0x00D2;
+  static constexpr uint16_t kRegFilt = 0x00D8;
+  static constexpr uint16_t kRegMrate = 0x00DA;
   // ID + command + byte count + 4 registers (2 bytes each) + CRC (2 bytes).
   static constexpr size_t kResponseLength = 3 + 2 * kRegCount + 2;
   // Function 0x06 (write single register) response is an 8-byte echo of
@@ -121,7 +166,16 @@ class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
     }
 
     while (true) {
+      if (!version_read_) {
+        uint16_t version;
+        if (ReadSingleRegister(kRegVersion, &version)) {
+          hardware_version_.store(version);
+          version_read_ = true;
+        }
+      }
+
       HandlePendingCommand();
+      HandlePendingSettings();
 
       SendReadRequest();
       float heading_radians;
@@ -185,6 +239,56 @@ class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
         break;
       case CalibrationCommand::kNone:
         break;
+    }
+  }
+
+  void HandlePendingSettings() {
+    int32_t requested_baud = pending_baud_.exchange(-1);
+    if (requested_baud >= 0) {
+      int8_t code = BaudRegisterCode(static_cast<uint32_t>(requested_baud));
+      if (code >= 0 &&
+          WriteRegister(kRegBaud, static_cast<uint16_t>(code))) {
+        // Assumes the sensor switches immediately after acking, at
+        // whatever baud the ack itself was just sent at -- see the file
+        // comment for the risk if that assumption doesn't hold.
+        serial_->begin(static_cast<uint32_t>(requested_baud), SERIAL_8N1,
+                        rx_pin_, tx_pin_);
+        delay(50);  // Let the UART settle after reconfiguring.
+        while (serial_->available()) {
+          serial_->read();
+        }
+      }
+      // On an unsupported baud or a failed/unacked write, nothing is
+      // changed; the request is simply dropped rather than retried, same
+      // as filter/push-interval below.
+    }
+
+    int32_t requested_filter = pending_filter_.exchange(-1);
+    if (requested_filter >= 0) {
+      WriteRegister(kRegFilt, static_cast<uint16_t>(requested_filter));
+    }
+
+    int32_t requested_interval = pending_push_interval_.exchange(-1);
+    if (requested_interval >= 0) {
+      WriteRegister(kRegMrate, static_cast<uint16_t>(requested_interval));
+    }
+  }
+
+  // Maps a baud rate to the sensor's BAUD register code, or -1 if
+  // unsupported. The manual's two tables disagree on what code 2 means
+  // (the AT+UART command table lists 460800; the Modbus register table
+  // lists 921600) -- this firmware talks to the sensor via the register
+  // interface, so the register table's value is authoritative here.
+  static int8_t BaudRegisterCode(uint32_t baud) {
+    switch (baud) {
+      case 9600:
+        return 0;
+      case 115200:
+        return 1;
+      case 921600:
+        return 2;
+      default:
+        return -1;
     }
   }
 
@@ -315,6 +419,54 @@ class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
     return true;
   }
 
+  // Reads a single holding register (Modbus function 0x03, count 1) --
+  // used for VERSION, which unlike MAGX..YAW is a single register, not a
+  // 4-register block.
+  bool ReadSingleRegister(uint16_t reg, uint16_t* out_value) {
+    uint8_t request[8] = {
+        kDeviceId,
+        0x03,
+        static_cast<uint8_t>(reg >> 8),
+        static_cast<uint8_t>(reg & 0xFF),
+        0,
+        1,
+        0,
+        0,
+    };
+    uint16_t crc = ModbusCrc16(request, 6);
+    request[6] = static_cast<uint8_t>(crc & 0xFF);
+    request[7] = static_cast<uint8_t>(crc >> 8);
+
+    while (serial_->available()) {
+      serial_->read();
+    }
+    serial_->write(request, sizeof(request));
+
+    constexpr size_t kLength = 3 + 2 + 2;  // id+cmd+len + 1 register + CRC.
+    uint8_t response[kLength];
+    size_t received = 0;
+    unsigned long deadline = millis() + kResponseTimeoutMs;
+    while (received < kLength && millis() < deadline) {
+      if (serial_->available()) {
+        response[received++] = serial_->read();
+      }
+    }
+    if (received < kLength) {
+      return false;
+    }
+    if (response[0] != kDeviceId || response[1] != 0x03 ||
+        response[2] != 2) {
+      return false;
+    }
+    uint16_t received_crc =
+        response[kLength - 2] | (response[kLength - 1] << 8);
+    if (ModbusCrc16(response, kLength - 2) != received_crc) {
+      return false;
+    }
+    *out_value = (response[3] << 8) | response[4];
+    return true;
+  }
+
   static uint16_t ModbusCrc16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {
@@ -331,10 +483,22 @@ class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
   }
 
   HardwareSerial* serial_;
+  gpio_num_t rx_pin_;
+  gpio_num_t tx_pin_;
   unsigned int poll_interval_ms_;
 
   std::atomic<CalibrationCommand> pending_command_{CalibrationCommand::kNone};
   std::atomic<CalibrationStatus> calibration_status_{CalibrationStatus::kIdle};
+
+  // Settings hand-off; -1 means "no pending request". Only touched via
+  // atomic ops, safe across the main/UI task and this reader's task.
+  std::atomic<int32_t> pending_baud_{-1};
+  std::atomic<int32_t> pending_filter_{-1};
+  std::atomic<int32_t> pending_push_interval_{-1};
+
+  std::atomic<uint16_t> hardware_version_{0};
+  // Only touched from Run()'s task, no synchronization needed.
+  bool version_read_ = false;
 
   // Auto-calibration rotation tracking; only touched from Run()'s task, no
   // synchronization needed.

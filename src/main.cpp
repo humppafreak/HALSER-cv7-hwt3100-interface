@@ -23,7 +23,9 @@
 //
 // The web UI also exposes HWT3100 magnetic field calibration controls
 // (Start/Stop/Auto/Clear Bias buttons, plus a status page item and OLED
-// line) — see hwt3100_heading_reader.h's calibration state machine.
+// line) — see hwt3100_heading_reader.h's calibration state machine — and
+// HWT3100 settings (baud rate, smoothing filter, active push interval),
+// plus a read-only hardware version display.
 //
 // Both inputs (wind, heading) and all three outputs (Signal K, N2K, UDP)
 // have independent, live-toggleable web UI checkboxes (see enabled_gate.h
@@ -57,6 +59,10 @@
 using namespace sensesp;
 using namespace sensesp::nmea0183;
 using namespace wind_interface;
+
+// mDNS name, WiFi station hostname, and (via set_wifi_access_point() below)
+// the first-boot/provisioning AP's SSID.
+constexpr char kHostname[] = "wind-hdg";
 
 // HALSER pin assignments
 constexpr int kWindBitRate = 4800;
@@ -112,20 +118,24 @@ void setup() {
   Wire.begin();
 
   Serial1.begin(kWindBitRate, SERIAL_8N1, kUART1RxPin, kUART1TxPin);
-  // UART0 is otherwise idle: the console (Serial) runs over USB CDC.
-  Serial0.begin(kHeadingBitRate, SERIAL_8N1, kHeadingRxPin, kHeadingTxPin);
+  // UART0 (for the HWT3100) is opened further down, once its persisted
+  // baud rate setting has been loaded — see the "HWT3100 settings"
+  // section below.
 
   // SensESP application
   SensESPAppBuilder builder;
   sensesp_app = (&builder)
-                    ->set_hostname("wind-hdg")
+                    ->set_hostname(kHostname)
                     ->set_button_pin(kButtonPin)
                     ->enable_ota("thisisfine")
-                    // Explicit rather than relying on SensESP's default
-                    // (which happens to be this same value) — keeps the
-                    // WiFi provisioning AP password in sync with the OTA
-                    // password if either one is ever changed.
-                    ->set_wifi_manager_password("thisisfine")
+                    // AP password intentionally matches the OTA password
+                    // above ("thisisfine" for both is a deliberate,
+                    // known-weak placeholder for bench/dev use — change
+                    // both before any non-bench deployment). SSID is set
+                    // explicitly to kHostname to preserve the previous
+                    // (now-deprecated set_wifi_manager_password) default
+                    // behavior, which used the hostname as the AP SSID.
+                    ->set_wifi_access_point(kHostname, "thisisfine")
                     ->get_app();
 
   /////////////////////////////////////////////////////////////////////
@@ -280,10 +290,75 @@ void setup() {
           }));
 
   /////////////////////////////////////////////////////////////////////
+  // HWT3100 settings: baud rate, smoothing filter, active push interval,
+  // and a read-only hardware version display. Filter/push interval are
+  // plain pass-through Modbus register writes; baud rate is applied live
+  // too, but also requires reconfiguring this device's own UART to match
+  // — see hwt3100_heading_reader.h.
+
+  float hwt3100_baud_default = kHeadingBitRate;
+  String hwt3100_baud_path = "/HWT3100/Baud Rate";
+  auto hwt3100_baud_config = std::make_shared<NumberConfig>(
+      hwt3100_baud_default, hwt3100_baud_path);
+  ConfigItem(hwt3100_baud_config)
+      ->set_title("HWT3100 Baud Rate")
+      ->set_description(
+          "UART baud rate for the HWT3100 (supported values: 9600, "
+          "115200, 921600). Applied live on change: writes the sensor's "
+          "BAUD register, then immediately reconfigures this device's "
+          "UART to match. If communication is lost after a change, "
+          "power-cycle the HWT3100 (resets it to 9600) and set this back "
+          "to 9600.")
+      ->set_sort_order(400);
+
+  float hwt3100_filter_default = 0.0f;
+  String hwt3100_filter_path = "/HWT3100/Smoothing Filter";
+  auto hwt3100_filter_config = std::make_shared<NumberConfig>(
+      hwt3100_filter_default, hwt3100_filter_path);
+  ConfigItem(hwt3100_filter_config)
+      ->set_title("HWT3100 Smoothing Filter")
+      ->set_description(
+          "Sensor-side smoothing filter (0 = off/default; 1-999, "
+          "smoother as the value decreases, per the manual). Applied "
+          "live on change.")
+      ->set_sort_order(410);
+
+  float hwt3100_push_interval_default = 0.0f;
+  String hwt3100_push_interval_path = "/HWT3100/Active Push Interval";
+  auto hwt3100_push_interval_config = std::make_shared<NumberConfig>(
+      hwt3100_push_interval_default, hwt3100_push_interval_path);
+  ConfigItem(hwt3100_push_interval_config)
+      ->set_title("HWT3100 Active Push Interval (ms)")
+      ->set_description(
+          "Sensor's own unsolicited-push interval (0 = standard "
+          "request/response, the default this firmware expects; "
+          "1-10000 = push every N ms). This firmware always polls with "
+          "its own request/response cycle and does not read the "
+          "sensor's autonomous push frames — leaving this at 0 is "
+          "strongly recommended, since a nonzero value can interleave "
+          "unsolicited frames with this firmware's own reads and "
+          "disrupt heading data. Applied live on change.")
+      ->set_sort_order(420);
+
+  auto hwt3100_version_status = std::make_shared<StatusPageItem<int>>(
+      "HWT3100 Hardware Version", 0, "Heading", 430);
+
+  /////////////////////////////////////////////////////////////////////
   // NMEA 2000 heading sender (HWT3100 fluxgate compass, optional)
 
-  auto heading_reader =
-      std::make_shared<Hwt3100HeadingReader>(&Serial0);
+  // Validate the persisted baud rate before using it — falls back to the
+  // sensor's factory default if the stored value isn't one of the three
+  // the HWT3100 actually supports (e.g. on first boot, before any value
+  // has been saved).
+  int hwt3100_baud_rate = static_cast<int>(hwt3100_baud_config->get_value());
+  if (hwt3100_baud_rate != 9600 && hwt3100_baud_rate != 115200 &&
+      hwt3100_baud_rate != 921600) {
+    hwt3100_baud_rate = kHeadingBitRate;
+  }
+  Serial0.begin(hwt3100_baud_rate, SERIAL_8N1, kHeadingRxPin, kHeadingTxPin);
+
+  auto heading_reader = std::make_shared<Hwt3100HeadingReader>(
+      &Serial0, kHeadingRxPin, kHeadingTxPin);
 
   // Input gate — see the wind speed/angle gates above for why every
   // consumer below reads from this rather than heading_reader directly.
@@ -427,12 +502,54 @@ void setup() {
       &(display->apparent_wind_angle_consumer));
   heading_gate->connect_to(&(display->heading_consumer));
 
+  // Tracks the last-applied value of each HWT3100 setting, since
+  // NumberConfig has no change-notification — polled and compared each
+  // cycle below instead. Declared here (not inside the lambda) and
+  // captured by reference; safe because setup() never returns (it ends in
+  // the infinite loop below), so this stack frame lives for the process
+  // lifetime, same as every other object captured by the lambdas in this
+  // file.
+  int hwt3100_last_seen_baud = hwt3100_baud_rate;
+  int hwt3100_last_seen_filter = static_cast<int>(hwt3100_filter_default);
+  int hwt3100_last_seen_push_interval =
+      static_cast<int>(hwt3100_push_interval_default);
+
   event_loop()->onRepeat(
-      500, [heading_reader, calibration_status_ui, display]() {
+      500, [heading_reader, calibration_status_ui, display,
+            hwt3100_baud_config, hwt3100_filter_config,
+            hwt3100_push_interval_config, hwt3100_version_status,
+            &hwt3100_last_seen_baud, &hwt3100_last_seen_filter,
+            &hwt3100_last_seen_push_interval]() {
         String status_text =
             CalibrationStatusText(heading_reader->GetCalibrationStatus());
         calibration_status_ui->set(status_text);
         display->SetCalibrationStatus(status_text);
+
+        int current_baud = static_cast<int>(hwt3100_baud_config->get_value());
+        if (current_baud != hwt3100_last_seen_baud) {
+          heading_reader->RequestSetBaudRate(
+              static_cast<uint32_t>(current_baud));
+          hwt3100_last_seen_baud = current_baud;
+        }
+
+        int current_filter =
+            static_cast<int>(hwt3100_filter_config->get_value());
+        if (current_filter != hwt3100_last_seen_filter) {
+          heading_reader->RequestSetFilter(
+              static_cast<uint16_t>(current_filter));
+          hwt3100_last_seen_filter = current_filter;
+        }
+
+        int current_push_interval =
+            static_cast<int>(hwt3100_push_interval_config->get_value());
+        if (current_push_interval != hwt3100_last_seen_push_interval) {
+          heading_reader->RequestSetPushInterval(
+              static_cast<uint16_t>(current_push_interval));
+          hwt3100_last_seen_push_interval = current_push_interval;
+        }
+
+        hwt3100_version_status->set(
+            static_cast<int>(heading_reader->GetHardwareVersion()));
       });
 
   while (true) {

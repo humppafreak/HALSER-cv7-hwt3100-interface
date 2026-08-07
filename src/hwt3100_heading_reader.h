@@ -104,7 +104,7 @@ class Hwt3100HeadingReader : public sensesp::ValueProducer<float> {
   static constexpr float kAutoCalibrationTargetDegrees = 720.0f;
   // Safety net so Auto can't get stuck in kAutoCalibrating forever if the
   // sensor is never actually rotated.
-  static constexpr unsigned long kAutoCalibrationTimeoutMs = 120000;
+  static constexpr unsigned long kAutoCalibrationTimeoutMs = 240000;
 
   static void TaskEntry(void* param) {
     static_cast<Hwt3100HeadingReader*>(param)->Run();

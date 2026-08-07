@@ -22,7 +22,7 @@ class EnabledGate : public sensesp::ValueConsumer<T>,
                      public sensesp::ValueProducer<T> {
  public:
   explicit EnabledGate(sensesp::CheckboxConfig* enabled_config)
-      : enabled_config_{enabled_config} {}
+      : sensesp::ValueProducer<T>(T{}), enabled_config_{enabled_config} {}
 
   void set(const T& new_value) override {
     if (enabled_config_->get_value()) {

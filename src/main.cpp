@@ -210,8 +210,8 @@ void setup() {
       "20240601",  // Manufacturer's Model serial code (max 32 chars)
       105,         // Manufacturer's product code
       "Wind-Hdg-N2K",  // Manufacturer's Model ID (max 33 chars)
-      "1.2.1",     // Manufacturer's Software version code (max 40 chars)
-      "1.2.1"      // Manufacturer's Model version (max 24 chars)
+      "1.2.2",     // Manufacturer's Software version code (max 40 chars)
+      "1.2.2"      // Manufacturer's Model version (max 24 chars)
   );
 
   nmea2000->SetDeviceInformation(

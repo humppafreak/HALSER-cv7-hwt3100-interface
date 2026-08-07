@@ -17,6 +17,15 @@
 //
 // output_enabled_config (see the constructor) is an optional live toggle:
 // while unchecked, send() is a no-op, so nothing is broadcast.
+//
+// Staleness: wind and heading are each tracked with their own "last
+// received" timestamp, expiring after kExpiryMs (5s, matching the N2K
+// senders' RepeatExpiring). Wind is still sent every cycle — so listeners
+// always see a consistent message rate, same rationale as the N2K
+// senders — but its NMEA 0183 status field is V (invalid) rather than A
+// once the data is stale or has never arrived. $--HDM has no equivalent
+// status field, so a stale/never-received heading is withheld entirely
+// instead of sent with a misleading "valid" tag.
 
 #ifndef WIND_INTERFACE_SRC_SENDER_UDP_NMEA0183_SENDER_H_
 #define WIND_INTERFACE_SRC_SENDER_UDP_NMEA0183_SENDER_H_
@@ -24,6 +33,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "sensesp/system/lambda_consumer.h"
@@ -44,16 +54,31 @@ class UdpNmea0183Sender {
                                      [this]() { this->send(); });
   }
 
-  sensesp::LambdaConsumer<float> wind_speed_consumer{
-      [this](float value) { this->wind_speed_ = value; }};
-  sensesp::LambdaConsumer<float> wind_angle_consumer{
-      [this](float value) { this->wind_angle_ = value; }};
+  sensesp::LambdaConsumer<float> wind_speed_consumer{[this](float value) {
+    this->wind_speed_ = value;
+    this->wind_received_at_ms_ = millis();
+    this->wind_ever_received_ = true;
+  }};
+  sensesp::LambdaConsumer<float> wind_angle_consumer{[this](float value) {
+    this->wind_angle_ = value;
+    this->wind_received_at_ms_ = millis();
+    this->wind_ever_received_ = true;
+  }};
   sensesp::LambdaConsumer<float> heading_consumer{[this](float value) {
     this->heading_ = value;
-    this->heading_valid_ = true;
+    this->heading_received_at_ms_ = millis();
+    this->heading_ever_received_ = true;
   }};
 
  private:
+  // Matches the N2K senders' RepeatExpiring expiry, so "stale" means the
+  // same thing across every output.
+  static constexpr unsigned long kExpiryMs = 5000;
+  // Comfortably above any real wind reading (200 m/s ~= 389 kt); guards
+  // against an out-of-range/garbage value blowing out the sentence via
+  // %.1f's decimal expansion.
+  static constexpr float kMaxSpeedMs = 200.0f;
+
   uint16_t port_;
   sensesp::CheckboxConfig* output_enabled_config_;
   WiFiUDP udp_;
@@ -61,9 +86,21 @@ class UdpNmea0183Sender {
   float wind_speed_ = 0;  // m/s
   float wind_angle_ = 0;  // radians, 0..2pi (apparent, relative reference)
   float heading_ = 0;     // radians, 0..2pi (magnetic)
-  // HWT3100 is optional hardware; don't broadcast a bogus 0.0 heading
-  // sentence until a real reading has arrived at least once.
-  bool heading_valid_ = false;
+
+  bool wind_ever_received_ = false;
+  unsigned long wind_received_at_ms_ = 0;
+  bool heading_ever_received_ = false;
+  unsigned long heading_received_at_ms_ = 0;
+
+  bool wind_stale() const {
+    return !wind_ever_received_ ||
+           (millis() - wind_received_at_ms_ > kExpiryMs);
+  }
+
+  bool heading_stale() const {
+    return !heading_ever_received_ ||
+           (millis() - heading_received_at_ms_ > kExpiryMs);
+  }
 
   static uint8_t Checksum(const String& sentence_body) {
     uint8_t checksum = 0;
@@ -101,19 +138,35 @@ class UdpNmea0183Sender {
         !output_enabled_config_->get_value()) {
       return;
     }
+
+    // Clamp to a sane range before formatting: an out-of-range value (e.g.
+    // NaN/Inf, or an absurd garbage reading) could otherwise expand to far
+    // more digits than fit in the buffer under %.1f.
+    float speed = wind_speed_;
+    if (!std::isfinite(speed)) {
+      speed = 0.0f;
+    }
+    speed = std::max(0.0f, std::min(speed, kMaxSpeedMs));
     float wind_angle_degrees =
         wind_angle_ * 180.0f / static_cast<float>(M_PI);
-    char body[64];
-    // Apparent wind, relative reference, speed in m/s — matches the values
-    // already sent to N2K/Signal K.
-    snprintf(body, sizeof(body), "IIMWV,%.1f,R,%.1f,M,A", wind_angle_degrees,
-              wind_speed_);
-    broadcast(WithChecksum(String(body)));
 
-    if (heading_valid_) {
-      float heading_degrees = heading_ * 180.0f / static_cast<float>(M_PI);
-      snprintf(body, sizeof(body), "HCHDM,%.1f,M", heading_degrees);
+    char body[64];
+    int written = snprintf(body, sizeof(body), "IIMWV,%.1f,R,%.1f,M,%s",
+                            wind_angle_degrees, speed,
+                            wind_stale() ? "V" : "A");
+    // A non-negative, in-bounds return means the sentence fit; anything
+    // else (truncated, or an encoding error) is skipped rather than
+    // broadcasting a checksummed-but-malformed sentence.
+    if (written > 0 && static_cast<size_t>(written) < sizeof(body)) {
       broadcast(WithChecksum(String(body)));
+    }
+
+    if (!heading_stale()) {
+      float heading_degrees = heading_ * 180.0f / static_cast<float>(M_PI);
+      written = snprintf(body, sizeof(body), "HCHDM,%.1f,M", heading_degrees);
+      if (written > 0 && static_cast<size_t>(written) < sizeof(body)) {
+        broadcast(WithChecksum(String(body)));
+      }
     }
   }
 };

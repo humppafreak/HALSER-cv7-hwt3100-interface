@@ -114,7 +114,7 @@ An input toggle and an output toggle are independent: disabling the wind input s
 
 The firmware calls `enable_ota(...)` (SensESP's ArduinoOTA integration), which accepts pushed updates over WiFi — it does not pull updates from a URL itself.
 
-The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.2.1.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.2.1.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
+The current release binary is committed directly in [`firmware/`](firmware/) (e.g. [`HALSER-cv7-hwt3100-interface-v1.2.2.bin`](firmware/HALSER-cv7-hwt3100-interface-v1.2.2.bin)) — download it from there. [`.github/workflows/release-firmware.yml`](.github/workflows/release-firmware.yml) can also build and publish binaries to the repository's [Releases](../../releases) page (on a `v*` tag push, or via manual `workflow_dispatch`), but Actions runner availability for this org has been unreliable, so the committed file in `firmware/` is the dependable source until that's sorted out.
 
 To flash a downloaded binary onto a device that's already running this firmware:
 
@@ -139,10 +139,15 @@ Wind data is emitted to Signal K as:
 
 If enabled (see [Enabling/Disabling Inputs and Outputs](#enablingdisabling-inputs-and-outputs) above), the firmware broadcasts NMEA 0183 sentences on UDP port 10110 — the convention chartplotter apps such as OpenCPN listen for — once per second:
 
-- `$IIMWV,<angle>,R,<speed>,M,A` — apparent wind, relative reference, speed in m/s
-- `$HCHDM,<heading>,M` — magnetic heading (only once the HWT3100 has produced at least one reading)
+- `$IIMWV,<angle>,R,<speed>,M,<status>` — apparent wind, relative reference, speed in m/s
+- `$HCHDM,<heading>,M` — magnetic heading
 
 These are synthesized from the same post-processing values sent to N2K/Signal K (wind angle after the reference offset), not relayed raw from the CV7. The broadcast address is recomputed from the device's current IP/subnet mask on every send, so it self-corrects across WiFi reconnects. See [`src/sender/udp_nmea0183_sender.h`](src/sender/udp_nmea0183_sender.h).
+
+**Staleness handling:** unlike the OLED (which has none — see below), the UDP output tracks each of wind and heading independently and considers a value stale after 5 seconds without an update, matching the N2K senders' `RepeatExpiring` window:
+
+- Wind is broadcast every cycle regardless (so listeners always see a consistent message rate), but `<status>` is `V` (invalid) instead of `A` once the data is stale or has never arrived, rather than silently claiming a frozen or default `0.0` reading is live.
+- `$HCHDM` has no equivalent status field, so a stale or never-received heading is withheld entirely — no `$HCHDM` sentence is sent that cycle — instead of broadcasting a misleading "valid" heading.
 
 ### NMEA 2000 Watchdog
 

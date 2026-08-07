@@ -47,6 +47,8 @@ Web UI ←→ Reference angle transform, 5 enable/disable toggles (persisted to 
 
 All five toggles (2 inputs, 3 outputs) apply live — `EnabledGate` and the N2K/UDP senders' internal `output_enabled_config` both read their `CheckboxConfig` on every value/send cycle rather than caching at boot, so no restart is needed.
 
+**Known limitation:** `NMEA0183IOTask` and `Hwt3100HeadingReader` each call `emit()` from their own FreeRTOS task directly into objects the main loop task also reads (e.g. `RepeatExpiring` in the N2K senders), with no mutex/queue between them — a genuine, accepted-tradeoff data race (single-core does not eliminate it, since FreeRTOS still preemptively interleaves tasks). See README.md's "Known Limitations" section and [issue #5](https://github.com/humppafreak/HALSER-cv7-hwt3100-interface/issues/5) for details.
+
 ### Source Layout
 
 **NMEA 2000 Output** (`src/sender/`):

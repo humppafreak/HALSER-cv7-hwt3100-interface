@@ -148,9 +148,14 @@ void setup() {
   // NMEA 0183 I/O task
   auto nmea0183_io_task = std::make_shared<NMEA0183IOTask>(&Serial1);
 
-  // Wind sentence parser — connected directly to parser, no TaskQueueProducer
-  // (ESP32-C3 is single-core, so cross-task bridging is unnecessary). The
-  // CV7 emits standard $IIMWV sentences (relative reference); SensESP's
+  // Wind sentence parser — connected directly to parser, no
+  // TaskQueueProducer bridging it onto the main task. NMEA0183IOTask calls
+  // emit() from its own FreeRTOS task straight into objects the main loop
+  // task also reads (e.g. RepeatExpiring in the N2K senders); this is a
+  // known, accepted risk, not a safe pattern — see the "Known Limitations"
+  // note in README.md's Architecture section (tracked as issue #5) for why
+  // it's tolerated here rather than fixed with a queue or mutex.
+  // The CV7 emits standard $IIMWV sentences (relative reference); SensESP's
   // built-in wind parser matches MWV regardless of talker ID, so it works
   // unmodified with the CV7's output.
   auto wind_parser =

@@ -17,6 +17,27 @@ pio run -t upload
 pio device monitor
 ```
 
+### HWT3100 Bench Test (plain ESP32-WROOM-32, no HALSER board)
+
+`src/wroom32_hwt3100_test/main.cpp` is a standalone Modbus wiring/protocol
+test for the HWT3100, for bench use with a plain ESP32-WROOM-32 dev board
+(e.g. AZ-Delivery's ESP32 Dev Kit C) when no HALSER board or CV7 is
+available. It reimplements a trimmed copy of the Modbus framing from
+`src/hwt3100_heading_reader.h` without the SensESP app dependency, and
+prints heading/version/calibration results to the USB serial console. Built
+by its own PlatformIO environment, kept separate from the `halser` env via
+`build_src_filter` so neither firmware pulls in the other's entry point:
+
+```bash
+# Build and upload the bench test (not the HALSER application)
+pio run -e wroom32_hwt3100_test -t upload
+pio device monitor -e wroom32_hwt3100_test
+```
+
+Default wiring: ESP32 GPIO16 (RX2) ← HWT3100 TX, GPIO17 (TX2) → HWT3100 RX,
+common GND — see the file header for serial monitor commands (version read,
+calibration start/stop/clear bias).
+
 ## Architecture
 
 ### Data Flow
